@@ -1,0 +1,8 @@
+/conclave
+/bin/
+/dist/
+/coverage.out
+/.cluster/
+*.test
+*.prof
+.DS_Store
