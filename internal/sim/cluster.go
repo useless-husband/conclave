@@ -283,8 +283,15 @@ func (s *Sim) crash(n *simNode, why string) {
 	n.nd = nil
 	n.inc++
 	n.disk.Crash()
-	if lost := s.loseSendBuffer(n, Time(s.nemRng.Intn(int(sendWindow)+1))); lost > 0 {
-		s.tracef("n%d lost %d unsent messages", n.id, lost)
+	// Half the crashes are power losses, which also take the messages
+	// still in the machine's socket buffers; a killed process's
+	// messages are sent by the kernel anyway.
+	if s.nemRng.Chance(1, 2) {
+		if lost := s.loseSendBuffer(n, Time(s.nemRng.Intn(int(sendWindow)+1))); lost > 0 {
+			s.tracef("n%d lost %d unsent messages (power loss)", n.id, lost)
+		}
+	} else {
+		n.outbox = n.outbox[:0]
 	}
 	n.pausedUntil = 0
 	s.tracef("n%d CRASH (%s)", n.id, why)

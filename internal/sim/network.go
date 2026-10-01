@@ -52,7 +52,7 @@ func (s *Sim) sendRaft(from raft.NodeID, m raft.Message) {
 }
 
 // sendWindow is how long a message may sit in the sender's buffers: a
-// crash loses the messages sent within the last LossWindow of it.
+// power loss loses the messages sent within a random part of it.
 const sendWindow = 2 * Millisecond
 
 // loseSendBuffer cancels the messages n sent within the last window before
