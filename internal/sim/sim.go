@@ -141,9 +141,12 @@ func (r *Result) Report() string {
 	fmt.Fprintf(&b, "FAILED with %d violation(s)\n", len(r.Violations))
 	fmt.Fprintf(&b, "profile: %v\n", r.Profile)
 	if !r.Mutations.Empty() {
+		// Mutations cannot be selected from the binary, only from tests.
 		fmt.Fprintf(&b, "mutations: %v\n", r.Mutations)
+		fmt.Fprintf(&b, "replay:  go test ./internal/sim -run 'TestMutationsAreDetected/%v' -sim.report -v\n", r.Mutations)
+	} else {
+		fmt.Fprintf(&b, "replay:  go run ./cmd/conclave sim -seed %d -trace\n", r.Seed)
 	}
-	fmt.Fprintf(&b, "replay:  go run ./cmd/conclave sim -seed %d -trace\n", r.Seed)
 	for i, v := range r.Violations {
 		if i == 10 {
 			fmt.Fprintf(&b, "... and %d more\n", len(r.Violations)-10)
