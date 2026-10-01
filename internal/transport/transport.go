@@ -83,7 +83,10 @@ func (t *Transport) SetAddrs(addrs map[raft.NodeID]string) {
 	defer t.mu.Unlock()
 	t.addrs = addrs
 	for id, p := range t.peers {
-		if a, ok := addrs[id]; ok && a != p.addr {
+		// A member that left, or moved: stop its connection. If it is
+		// still needed (a server not yet in the membership, known from its
+		// hello), the next Send starts a new one.
+		if a, ok := addrs[id]; !ok || a != p.addr {
 			p.stop()
 			delete(t.peers, id)
 		}

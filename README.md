@@ -347,7 +347,9 @@ when a write may or may not have taken effect.
 - **Reads are served by the leader only**, through ReadIndex; there are no
   follower reads or leases.
 - **The state machine is in memory**; its size is bounded by RAM, and a
-  snapshot is a full copy.
+  snapshot is a full copy. Each client session (at most 4,096, evicted least
+  recently used) also keeps the result of its last write, which for a delete
+  or a failed CAS includes a value of up to 1 MiB.
 - **No dynamic reconfiguration of addresses**: a server must come back on the
   addresses it was added with.
 
