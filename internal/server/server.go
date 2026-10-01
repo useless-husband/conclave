@@ -214,6 +214,9 @@ func Start(cfg Config) (*Server, error) {
 	if err := s.open(); err != nil {
 		s.tr.Close()
 		s.apiLn.Close()
+		if s.w != nil {
+			s.w.Close()
+		}
 		return nil, err
 	}
 	addrs, _ := json.Marshal(Addresses{ID: uint64(cfg.ID), Raft: s.tr.Addr(), API: s.apiLn.Addr().String(), PID: os.Getpid()})
