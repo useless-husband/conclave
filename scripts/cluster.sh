@@ -1,7 +1,8 @@
 #!/bin/sh
 # Run a 3-server conclave cluster on 127.0.0.1 with ephemeral ports.
 #
-#   scripts/cluster.sh start [DIR]     build, start n1..n3, join them; prints the client address list
+#   scripts/cluster.sh start [DIR]     build, start n1..n3, join them (or restart an existing
+#                                      cluster in DIR); prints the client address list
 #   scripts/cluster.sh stop [DIR]      stop every server started from DIR (by PID)
 #   scripts/cluster.sh kill N [DIR]    SIGKILL server N
 #   scripts/cluster.sh restart N [DIR] start server N again on its old data and ports
@@ -61,12 +62,19 @@ start)
 	fi
 	mkdir -p "$dir"
 	go build -o "$bin" ./cmd/conclave
-	launch 1 -bootstrap
-	launch 2
-	launch 3
-	for id in 2 3; do
-		"$bin" members add -addr "$(api 1)" -id "$id" -raft "$(raftaddr $id)" -api "$(api $id)" >/dev/null
-	done
+	if [ -d "$dir/n1/wal" ]; then
+		# An existing cluster: bring its servers back on their data.
+		launch 1
+		launch 2
+		launch 3
+	else
+		launch 1 -bootstrap
+		launch 2
+		launch 3
+		for id in 2 3; do
+			"$bin" members add -addr "$(api 1)" -id "$id" -raft "$(raftaddr $id)" -api "$(api $id)" >/dev/null
+		done
+	fi
 	addrs="$(api 1),$(api 2),$(api 3)"
 	echo "export CONCLAVE_ADDR=$addrs" >"$dir/env"
 	echo "cluster running: n1 pid $(cat "$dir/n1.pid"), n2 pid $(cat "$dir/n2.pid"), n3 pid $(cat "$dir/n3.pid")"
