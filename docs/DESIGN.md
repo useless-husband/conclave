@@ -223,7 +223,14 @@ servers that applied the same prefix must hold identical state; and the
 clients' history must be linearizable.
 
 **Clients** run one operation at a time with think time, retry like the real
-client, and record each operation's invocation and response times. A write
+client, and record each operation's invocation and response times. Their
+requests and answers can be delayed and lost but are never duplicated: the
+real client speaks HTTP over TCP, where a request cannot reach the server
+twice. An early version did duplicate them, and a 40,000-seed sweep failed
+at seed 16800: a server proposed a write and crashed, a duplicate of the
+same request reached the restarted server and was refused, and the client
+took that refusal as the answer to its attempt. The checker was right to
+reject the history; the model of the client's connection was wrong. A write
 whose outcome they never learn enters the history as unknown, bounded by the
 time the same session's next write completed (after that the session refuses
 the older sequence number, so the abandoned write took effect before or

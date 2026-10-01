@@ -81,10 +81,14 @@ func (n *simNode) trimOutbox(now Time) {
 }
 
 // sendRequest carries a client request to a server. Clients are never
-// partitioned away, but their messages can be lost, duplicated and
-// delayed like any other.
+// partitioned away, but their messages can be lost and delayed like any
+// other. They are not duplicated: clients talk to servers over TCP (HTTP),
+// where one request cannot reach the application twice. A duplicate would
+// let the same attempt be executed by one incarnation of a server and
+// refused by the next, and the refusal is not an answer the real client can
+// ever receive.
 func (s *Sim) sendRequest(to raft.NodeID, req node.Request) {
-	for i := s.copies(); i > 0; i-- {
+	if s.copies() > 0 {
 		s.at(s.delay(), &event{kind: evRequest, node: to, req: req})
 	}
 }
@@ -112,7 +116,7 @@ func (s *Sim) routeResponse(from *simNode, resp node.Response) {
 		s.onAdminResponse(from, rt, resp)
 		return
 	}
-	for i := s.copies(); i > 0; i-- {
+	if s.copies() > 0 {
 		s.at(s.delay(), &event{kind: evResponse, cl: rt.client, resp: resp})
 	}
 }
