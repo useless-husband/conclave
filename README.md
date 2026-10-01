@@ -30,7 +30,7 @@ when things do go wrong:
   write-ahead-log recovery bug that could silently drop acknowledged writes
   two restarts after an unlucky crash ([details](docs/DESIGN.md#4-the-write-ahead-log)).
 
-Standard library only. About 9,000 lines of Go plus 3,500 lines of tests.
+Standard library only: about 9,000 lines of Go and 3,700 lines of tests.
 
 ## Try it
 
@@ -79,24 +79,68 @@ $ curl -s -X POST -H 'Conclave-Session: 7' -H 'Conclave-Seq: 1' -d '{"expect_abs
 {"found":false,"swapped":true,"index":9}
 ```
 
-And the simulator, replaying one seed:
+And the simulator, replaying one seed (servers crash in the middle of disk
+writes every 0.7 s on average, members are added and removed, leadership is
+transferred):
 
 ```console
-$ go run ./cmd/conclave sim -seed 42
-seed 42: profile nodes=3 clients=3 keys=1 drop=30‰ dup=10‰ delay=0.000100s..0.005000s spike=0‰/1.000000s partition/3.000000s pause/2.000000s midio=50% torn=100% skew=5% transition-crash=0% maxents=1 snapevery=1000 segment=16384 sessions=4096 timeout=0.030000s deadline=0.300000s think<=0.001000s
-25.000000s simulated in 568ms: 532295 events, 514097 messages (16694 dropped), 4381 client operations (21 unknown), 0 crashes (0 mid-I/O, 0 torn writes), 3 partitions, 15 pauses, 9 elections, max term 9, 0 snapshots installed, 0 members added, 0 removed
-history: 4387 operations checked (15 dropped as unobservable), linearizable, 7608 search steps
-digest df27f74703e53d2a
+$ go run ./cmd/conclave sim -seed 17
+seed 17: profile nodes=3 clients=6 keys=1 drop=0‰ dup=10‰ delay=0.000100s..0.001000s spike=50‰/1.000000s crash/0.700000s membership/2.000000s transfer/2.000000s midio=100% torn=0% skew=5% transition-crash=0% reconfigure-on-election maxents=64 snapevery=50 segment=16384 sessions=4096 timeout=0.030000s deadline=5.000000s think<=0.020000s
+25.000000s simulated in 113ms: 96705 events, 55378 messages (0 dropped), 4549 client operations (0 unknown), 27 crashes (27 mid-I/O, 0 torn writes), 0 partitions, 0 pauses, 19 elections, max term 25, 12 snapshots installed, 3 members added, 2 removed
+history: 4549 operations checked (0 dropped as unobservable), linearizable, 12775 search steps
+digest ba6d09b8888aa8b2
+$ go run ./cmd/conclave sim -seed 17 -trace | grep -E 'CRASH|restart|ADD|leader term|torn'
+0.101551s  n2 leader term=1 last=0
+0.102250s  ADD n4 requested at leader n2
+0.102250s  ADD n4 at n2: retry
+0.318293s  n2 CRASH (crashed in the middle of disk I/O)
+0.721578s  n2 restart
+0.721578s  n2 recovery cut a torn tail of 5 bytes
+0.768317s  n1 leader term=2 last=43
+0.769162s  ADD n4 requested at leader n1
+0.771044s  ADD n4 at n1: ok
+0.880049s  n1 CRASH (crashed in the middle of disk I/O)
+...
 ```
 
 ## What a failure looks like
 
 With the `read-without-quorum` bug switched on (a leader answers reads
 without first confirming with a round of heartbeats that it is still
-leader), seed 74 ends like this (abridged):
+leader), seed 74 ends like this (abridged). A partition cuts the leader n2
+off from n1 and n3 at 0.999 s; n3 wins term 2 and acknowledges two puts by
+1.602 s; at 1.605 s a client asks n2, which still believes it leads (old,
+delayed acknowledgements kept its check-quorum satisfied), and n2 answers
+with the value from before the partition:
 
 ```
-{{FAILURE}}
+seed 74: FAILED with 1 violation(s)
+profile: nodes=3 clients=5 keys=1 drop=0‰ dup=50‰ delay=0.000100s..0.005000s spike=50‰/1.000000s partition/0.700000s crash/3.000000s membership/2.000000s transfer/2.000000s ...
+mutations: read-without-quorum
+replay:  go run ./cmd/conclave sim -seed 74 -trace
+
+[25.000000s] linearizability: key "k0" (3996 operations) is not linearizable
+longest linearizable prefix found: 192 of 3996 operations, the last 12 of them:
+  ...
+  client 2 [1001657, 1601592] put("k0", "c2.34") -> ok  -> "c2.34"
+  client 4 [1093977, 1599056] put("k0", "c4.44") -> ok  -> "c4.44"
+  client 1 [1065373, 1612328] put("k0", "c1.40") -> ok  -> "c1.40"
+  client 0 [997325, 1617696] cas("k0", "c0.31", "c0.32") -> cas-failed  -> "c1.40"
+  client 4 [1605396, 1617183] cas("k0", "c4.44", "c4.45") -> cas-failed  -> "c1.40"
+in state "c1.40" nothing can be linearized before the return of
+  client 2 [1604659, 1608602] get("k0") -> "c0.31"
+...
+trace from 0.741610s to 1.628602s, around the operations the linearizability checker could not place:
+...
+0.998677s  PARTITION split n1-x>n2 n2-x>n1 n2-x>n3 n3-x>n2
+...
+1.542934s  n1 votes for n3 term=2
+1.547030s  n3 leader term=2 last=121
+1.599056s  client 4 put("k0", "c4.44") -> ok (index 123)
+1.601592s  client 2 put("k0", "c2.34") -> ok (index 124)
+1.604659s  client 2 sends get("k0") to n2 (request 440)
+1.608602s  client 2 get("k0") -> ok "c0.31" (index 121)
+...
 ```
 
 The seed, the fault profile, the operations the checker could not place,
@@ -113,7 +157,28 @@ violation, then re-runs that seed without the bug and requires it to pass.
 The test fails if a bug survives past its bound (about twice the number
 below).
 
-{{MUTATIONS}}
+| injected bug (one line of the real code changed) | first failing seed | caught by |
+|---|---:|---|
+| `vote-without-log-check`: grant a vote without the "candidate's log is at least as up to date" check (§5.4.1) | 2 | state-machine safety, linearizability |
+| `commit-prior-term-by-count`: commit an old-term entry once a majority stores it (Figure 8) | 5,584 | state-machine safety |
+| `vote-not-persisted`: answer a vote request without first writing the vote to disk | 383 | election safety (two leaders in one term) |
+| `ack-before-fsync`: acknowledge appended entries (and count the leader's own copy) before fsync | 3 | state-machine safety |
+| `read-without-quorum`: serve a read from a leader without the ReadIndex heartbeat round | 74 | linearizability (a deposed leader's stale read) |
+| `duplicate-apply`: ignore the session table, so a retried write is applied again | 1 | linearizability |
+| `skip-wal-checksum`: replay WAL records without verifying their checksum | 241 | state-machine safety (a torn record replayed as data) |
+| `skip-dir-sync`: do not fsync the directory after creating a WAL segment | 5 | state-machine safety, election safety, linearizability |
+| `truncate-without-marker`: install a leader's snapshot without the record that voids the old log | 1 | recovery (the WAL no longer opens) |
+| `conf-change-before-term-commit`: propose a membership change before committing in the term (Ongaro, 2015) | 3,358 | state-machine safety |
+
+All ten together took 314 s on four workers. The two expensive ones need a
+precise sequence of crashes: Figure 8 needs a leader to die with an
+uncommitted entry, a second leader to die with a different one at the same
+index, and the first to come back and die again between two acknowledgements.
+The membership bug, which `TestOngaro2015MembershipBug` also replays step by
+step, needs two overlapping reconfigurations by leaders of different terms.
+Neither was found in 2,000 seeds until the simulator learned to lose a
+crashing server's unsent messages (power loss) and to crash a leader just as
+it advances its commit index.
 
 ### The unmodified code
 

@@ -19,7 +19,7 @@ conclave 的重點是證明「出事時也是對的」：
 - **真的找到過 bug。** 開發期間模擬器找到一個 WAL 復原的 bug：在不巧的時機當機後，兩次重開之後可能
   默默丟掉已確認的寫入（[細節](docs/DESIGN.md#4-the-write-ahead-log)）。
 
-只用 Go 標準函式庫。約 9,000 行 Go 程式加 3,500 行測試。
+只用 Go 標準函式庫：約 9,000 行 Go 程式與 3,700 行測試。
 
 ## 試用
 
@@ -47,7 +47,7 @@ n1 running again, pid 78176
 $ scripts/cluster.sh stop
 ```
 
-HTTP API 和模擬器的完整範例請見英文 README。重播任一個種子：`go run ./cmd/conclave sim -seed 42 -trace`。
+HTTP API 和模擬器的完整範例請見英文 README。重播任一個種子：`go run ./cmd/conclave sim -seed 17 -trace`。
 
 ## 結果
 
@@ -57,7 +57,21 @@ HTTP API 和模擬器的完整範例請見英文 README。重播任一個種子�
 回報安全性違反為止，再用同一個種子在**沒有** bug 的情況下重跑一次，必須通過（排除是模擬器自己的問題）。
 超過上限（約為下表數字的兩倍）測試就失敗。
 
-{{MUTATIONS}}
+| 植入的 bug（真正程式碼改錯一行） | 第一個失敗的種子 | 由什麼抓到 |
+|---|---:|---|
+| `vote-without-log-check`：投票時不檢查候選人日誌是否夠新（§5.4.1） | 2 | 狀態機安全性、線性一致性 |
+| `commit-prior-term-by-count`：舊任期的條目在過半數機器上就宣布定案（Figure 8） | 5,584 | 狀態機安全性 |
+| `vote-not-persisted`：投票前沒先把票寫進硬碟 | 383 | 選舉安全性（同一任期兩個領導者） |
+| `ack-before-fsync`：fsync 之前就確認收到條目 | 3 | 狀態機安全性 |
+| `read-without-quorum`：領導者回答讀取前不做 ReadIndex 心跳確認 | 74 | 線性一致性（被取代的領導者讀到舊值） |
+| `duplicate-apply`：忽略 session 表，重送的寫入再執行一次 | 1 | 線性一致性 |
+| `skip-wal-checksum`：重放 WAL 時不檢查校驗碼 | 241 | 狀態機安全性（寫一半的紀錄被當成資料） |
+| `skip-dir-sync`：建立 WAL 分段檔後不 fsync 目錄 | 5 | 狀態機安全性、選舉安全性、線性一致性 |
+| `truncate-without-marker`：安裝領導者的快照時不寫作廢舊日誌的紀錄 | 1 | 復原失敗（WAL 打不開） |
+| `conf-change-before-term-commit`：還沒在本任期提交任何條目就提出成員變更（Ongaro 2015） | 3,358 | 狀態機安全性 |
+
+十種合計在 4 個 worker 上花 314 秒。最貴的兩種需要非常精準的當機順序；在模擬器學會「斷電時丟掉還沒送出的封包」和「領導者剛推進提交位置時當機」之前，兩者在 2,000 個種子內都沒被找到。
+成員變更的那個 bug 另外有 `TestOngaro2015MembershipBug` 一步一步重現。
 
 ### 未修改的程式碼
 
