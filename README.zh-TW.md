@@ -76,7 +76,18 @@ HTTP API 和模擬器的完整範例請見英文 README。重播任一個種子�
 
 ### 未修改的程式碼
 
-{{SWEEP}}
+`go run ./cmd/conclave sim -seeds 1-40000 -workers 4`（最終版程式碼）：
+
+```
+seeds 1-40000: 40000 runs, 0 failed, 0 inconclusive checks
+simulated 277.8 hours in 19m34s wall on 4 workers (852 simulated seconds per wall second)
+4002243215 events, 3083148322 messages, 103160578 client operations checked for linearizability (616445 with unknown outcome)
+1504264 crashes (702930 in the middle of disk I/O, 147135 torn writes), 238914 partitions, 122182 pauses, 953195 elections, 179997 snapshots installed, 39824 members added, 35465 removed
+```
+
+每個種子是 20 秒有故障加 5 秒無故障的虛擬時間。4 萬個種子等於模擬了 277.8 小時、1.03 億個客戶端操作，
+每一個都經過檢查，沒有任何安全性或活性違反，也沒有檢查器跑不完的情況。模擬器每個 CPU 核心每秒約跑 210 秒模擬時間
+（4 個 worker 合計 852；量測時機器同時在做其他工作）。
 
 ### 真實行程
 
@@ -95,7 +106,27 @@ HTTP API 和模擬器的完整範例請見英文 README。重播任一個種子�
 
 ### 效能
 
-{{BENCH}}
+`scripts/bench.sh` 為每種耐久性模式在 127.0.0.1 開一組新的 3 台叢集，用 `conclave bench` 測：
+閉迴路客戶端（每個有自己的 session，收到回覆就送下一個），暖機 1 秒後量 10 秒，延遲在客戶端量測。
+put 寫 64 位元組的值到 1,000 個 key；get 是線性一致的 ReadIndex 讀取；mixed 各半。
+
+機器：Apple M5（10 核）、16 GB、內建 SSD、macOS 27、Go 1.27.1。伺服器和客戶端共用這台機器和同一顆 SSD，
+量測時機器同時在做其他工作。
+
+| 耐久性 | 工作負載 | 客戶端 | 每秒請求 | p50 | p99 |
+|---|---|---:|---:|---:|---:|
+| `full`（F_FULLFSYNC） | put | 1 | 99 | 10.98 ms | 13.94 ms |
+| `full` | put | 16 | 532 | 30.87 ms | 38.99 ms |
+| `full` | put | 128 | 4,166 | 31.22 ms | 42.13 ms |
+| `full` | get | 1 | 11,192 | 0.09 ms | 0.15 ms |
+| `full` | get | 128 | 103,946 | 1.09 ms | 3.46 ms |
+| `none` | put | 1 | 6,921 | 0.13 ms | 0.30 ms |
+| `none` | put | 16 | 28,405 | 0.56 ms | 1.17 ms |
+| `none` | put | 128 | 55,669 | 2.15 ms | 5.04 ms |
+
+耐久寫入受限於硬碟快取 flush：單獨一次 `F_FULLFSYNC` 約 3.7 毫秒，三台的 flush 又在同一顆 SSD 上排隊，所以單一客戶端約 11 毫秒；
+客戶端多時批次提交讓一次 flush 涵蓋整批，吞吐從 99 提高到 4,166。讀取不碰硬碟，只需要一輪心跳。
+`-fsync none` 不保證斷電安全，只用來看共識與 API 本身的成本。
 
 ## 運作方式
 

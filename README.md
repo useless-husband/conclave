@@ -187,7 +187,22 @@ right after its first commit.
 
 ### The unmodified code
 
-{{SWEEP}}
+`go run ./cmd/conclave sim -seeds 1-40000 -workers 4`, the final run on the
+code as committed:
+
+```
+seeds 1-40000: 40000 runs, 0 failed, 0 inconclusive checks
+simulated 277.8 hours in 19m34s wall on 4 workers (852 simulated seconds per wall second)
+4002243215 events, 3083148322 messages, 103160578 client operations checked for linearizability (616445 with unknown outcome)
+1504264 crashes (702930 in the middle of disk I/O, 147135 torn writes), 238914 partitions, 122182 pauses, 953195 elections, 179997 snapshots installed, 39824 members added, 35465 removed
+```
+
+Each seed is 20 s of virtual time with faults and 5 s without. 40,000 seeds
+is 277.8 simulated hours and 103 million client operations, every one of
+them checked; no safety or liveness violation and no inconclusive
+linearizability check. The simulator runs about 210 simulated seconds per
+wall second per core (852 on four workers, on a machine shared with other
+work), so a CI run of 500 seeds takes well under a minute.
 
 ### Real processes
 
@@ -210,7 +225,49 @@ writes end with an unknown outcome while a leader is being replaced:
 
 ### Performance
 
-{{BENCH}}
+`scripts/bench.sh` starts a fresh 3-server cluster on 127.0.0.1 for each
+durability mode and runs `conclave bench` against all three addresses:
+closed-loop clients, each with its own session, issuing the next request as
+soon as the previous one is answered, for 10 s after a 1 s warm-up; latency
+is measured in the client, request to answer. Puts write 64-byte values to
+1,000 keys; gets are linearizable ReadIndex reads; "mixed" is half and half.
+
+Machine: Apple M5 (10 cores), 16 GB, internal SSD, macOS 27, Go 1.27.1. The
+servers and the clients share the machine and the one SSD, and the machine
+was running other work at the same time.
+
+| durability | workload | clients | requests/s | p50 | p99 |
+|---|---|---:|---:|---:|---:|
+| `full` (F_FULLFSYNC) | put | 1 | 99 | 10.98 ms | 13.94 ms |
+| `full` | put | 16 | 532 | 30.87 ms | 38.99 ms |
+| `full` | put | 128 | 4,166 | 31.22 ms | 42.13 ms |
+| `full` | get | 1 | 11,192 | 0.09 ms | 0.15 ms |
+| `full` | get | 16 | 59,525 | 0.25 ms | 0.62 ms |
+| `full` | get | 128 | 103,946 | 1.09 ms | 3.46 ms |
+| `full` | mixed | 128 | 4,210 | 30.92 ms | 40.26 ms |
+| `none` | put | 1 | 6,921 | 0.13 ms | 0.30 ms |
+| `none` | put | 16 | 28,405 | 0.56 ms | 1.17 ms |
+| `none` | put | 128 | 55,669 | 2.15 ms | 5.04 ms |
+| `none` | mixed | 128 | 63,896 | 1.90 ms | 4.47 ms |
+
+What the numbers say:
+
+- **Durable writes are bound by the disk's cache flush.** `F_FULLFSYNC`
+  takes about 3.7 ms on this SSD by itself, and the three servers' flushes
+  queue behind each other on the one device. A write needs the leader's and
+  a follower's flush, so one client sees about 11 ms. More clients do not
+  shorten that, but group commit lets each flush cover a whole batch:
+  throughput grows from 99 to 4,166 writes per second between 1 and 128
+  clients, while latency stays near 31 ms from 16 clients up.
+- **Reads do not touch the disk.** A ReadIndex read costs one heartbeat
+  round to the followers, so reads run at memory and loopback speed in
+  either mode.
+- **`-fsync none`** shows the cost of everything else (consensus, the HTTP
+  API, the state machine): 28,000 writes per second at 0.56 ms with 16
+  clients. It gives up durability across power loss and is for benchmarks.
+
+The full output, including `-fsync none` gets and the 1- and 16-client mixed
+runs, is reproducible with `make bench`.
 
 ## How it works
 
