@@ -78,7 +78,11 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "conclave:", err)
+		msg := err.Error()
+		if !strings.HasPrefix(msg, "conclave:") {
+			msg = "conclave: " + msg
+		}
+		fmt.Fprintln(os.Stderr, msg)
 		os.Exit(1)
 	}
 }

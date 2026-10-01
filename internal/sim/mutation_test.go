@@ -85,6 +85,11 @@ func TestMutationsAreDetected(t *testing.T) {
 				t.Errorf("%v: no violation in seeds 1..%d", m, bound)
 				return
 			}
+			// The same seed without the bug must pass, or the "detection"
+			// is a bug in the harness or in the unmutated code.
+			if control := Run(Options{Seed: seed}); control.Failed() {
+				t.Fatalf("seed %d also fails without the mutation:\n%s", seed, control.Report())
+			}
 			fmt.Fprintf(&table, "| %v | %d | %s |\n", m, seed, strings.Join(r.Kinds(), ", "))
 			t.Logf("detected at seed %d: %v", seed, r.Kinds())
 			if testing.Verbose() {
