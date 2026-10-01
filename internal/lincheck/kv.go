@@ -17,10 +17,15 @@ type Op struct {
 	Return int64
 	// Unknown marks an operation whose outcome the client never learned,
 	// such as a write that timed out. It may or may not have taken effect.
+	// If Return is not zero it bounds when the operation can have taken
+	// effect: a client session gives that bound, because once a later
+	// write of the same session has been applied, an earlier one never
+	// will be.
 	Unknown bool
 	// Result is the observed outcome when Unknown is false: Code OK or
-	// NotFound (with Value) for get, OK or NotFound for delete, OK or
-	// CASFailed for cas, OK for put.
+	// NotFound for get and delete, OK or CASFailed for cas, OK for put,
+	// with Found and Value describing the key as the operation found it
+	// (see kv.Result).
 	Result kv.Result
 }
 
@@ -50,13 +55,15 @@ func (r register) String() string {
 
 func stepKV(s register, op Op, unknown bool) (bool, register) {
 	c, res := op.Cmd, op.Result
+	// sees reports whether the result describes state s.
+	sees := func() bool { return res.Found == s.present && (!s.present || res.Value == s.value) }
 	switch c.Kind {
 	case kv.Get:
 		if unknown {
 			return true, s
 		}
 		if s.present {
-			return res.Code == kv.OK && res.Value == s.value, s
+			return res.Code == kv.OK && sees(), s
 		}
 		return res.Code == kv.NotFound, s
 	case kv.Put:
@@ -66,7 +73,7 @@ func stepKV(s register, op Op, unknown bool) (bool, register) {
 			return true, register{}
 		}
 		if s.present {
-			return res.Code == kv.OK, register{}
+			return res.Code == kv.OK && sees(), register{}
 		}
 		return res.Code == kv.NotFound, s
 	case kv.CAS:
@@ -74,7 +81,7 @@ func stepKV(s register, op Op, unknown bool) (bool, register) {
 		if match {
 			return unknown || res.Code == kv.OK, register{value: c.Value, present: true}
 		}
-		return unknown || res.Code == kv.CASFailed, s
+		return unknown || res.Code == kv.CASFailed && sees(), s
 	}
 	return false, s
 }
@@ -90,6 +97,21 @@ var KVModel = Model[register, Op]{
 		}
 		h.Write([]byte(r.value))
 		return h.Sum64()
+	},
+	EffectKey: func(o Op) string {
+		c := o.Cmd
+		switch c.Kind {
+		case kv.Put:
+			return "put\x00" + c.Value
+		case kv.Delete:
+			return "delete"
+		case kv.CAS:
+			if c.ExpectAbsent {
+				return "cas-absent\x00" + c.Value
+			}
+			return "cas\x00" + c.Expect + "\x00" + c.Value
+		}
+		return ""
 	},
 	DescribeState: func(r register) string { return r.String() },
 	DescribeOp:    func(o Op) string { return o.String() },
@@ -107,7 +129,10 @@ type Report struct {
 	Verdict Verdict
 	Keys    []KeyResult // one per key, sorted by key
 	Ops     int
-	Dropped int // reads with unknown outcome, which cannot affect the verdict
+	// Dropped counts operations left out because they cannot affect the
+	// verdict: reads with an unknown outcome, and writes with an unknown
+	// outcome whose value no operation ever observed (see CheckKV).
+	Dropped int
 }
 
 // Failed returns the per-key results that are violations.
@@ -140,19 +165,31 @@ func (r Report) String() string {
 // budget search steps per key (no limit if budget <= 0). Operations whose
 // Return is before their Call are rejected by panicking: that is a bug in
 // the recorder, not in the system under test.
+//
+// Before searching, CheckKV drops every write with an unknown outcome whose
+// value is never mentioned by another operation of the same key: not
+// returned by a get, a delete or a failed cas, and not expected by any cas.
+// This is sound because every outcome in the model that depends on the
+// key's state reveals that state. Given a linearization in which such a
+// write w takes effect, the operations placed after w and before the next
+// write either reveal w's value (impossible, it is never mentioned) or are
+// unknown-outcome cas operations that fail in that state and can be left
+// out; the next write does not depend on the state. Removing w and those
+// no-ops leaves a valid linearization. Without this reduction every pending
+// unknown write doubles the search space, and histories from runs with many
+// timeouts exhaust any budget.
 func CheckKV(ops []Op, budget int) Report {
-	byKey := map[string][]Event[Op]{}
+	byKey := map[string][]Op{}
 	rep := Report{}
 	for _, o := range ops {
-		if !o.Unknown && o.Return < o.Call {
+		if (!o.Unknown || o.Return != 0) && o.Return < o.Call {
 			panic(fmt.Sprintf("lincheck: operation returns before it is called: %+v", o))
 		}
 		if o.Cmd.Kind == kv.Get && o.Unknown {
 			rep.Dropped++
 			continue
 		}
-		rep.Ops++
-		byKey[o.Cmd.Key] = append(byKey[o.Cmd.Key], Event[Op]{Op: o, Client: o.Client, Call: o.Call, Return: o.Return, Unknown: o.Unknown})
+		byKey[o.Cmd.Key] = append(byKey[o.Cmd.Key], o)
 	}
 	keys := make([]string, 0, len(byKey))
 	for k := range byKey {
@@ -160,8 +197,27 @@ func CheckKV(ops []Op, budget int) Report {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		res := Check(KVModel, byKey[k], budget)
-		rep.Keys = append(rep.Keys, KeyResult{Key: k, Ops: len(byKey[k]), Result: res})
+		kops := byKey[k]
+		mentioned := map[string]bool{}
+		for _, o := range kops {
+			if o.Cmd.Kind == kv.CAS && !o.Cmd.ExpectAbsent {
+				mentioned[o.Cmd.Expect] = true
+			}
+			if !o.Unknown && o.Result.Found {
+				mentioned[o.Result.Value] = true
+			}
+		}
+		events := make([]Event[Op], 0, len(kops))
+		for _, o := range kops {
+			if o.Unknown && (o.Cmd.Kind == kv.Put || o.Cmd.Kind == kv.CAS) && !mentioned[o.Cmd.Value] {
+				rep.Dropped++
+				continue
+			}
+			events = append(events, Event[Op]{Op: o, Client: o.Client, Call: o.Call, Return: o.Return, Unknown: o.Unknown})
+		}
+		rep.Ops += len(events)
+		res := Check(KVModel, events, budget)
+		rep.Keys = append(rep.Keys, KeyResult{Key: k, Ops: len(events), Result: res})
 		switch {
 		case res.Verdict == Violation:
 			rep.Verdict = Violation

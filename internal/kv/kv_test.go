@@ -56,13 +56,13 @@ func TestOperations(t *testing.T) {
 		{Command{Kind: Delete, Key: "x"}, Result{Code: NotFound}},
 		{Command{Kind: CAS, Key: "x", Expect: "", Value: "1"}, Result{Code: CASFailed}},
 		{Command{Kind: CAS, Key: "x", ExpectAbsent: true, Value: "1"}, Result{Code: OK}},
-		{Command{Kind: CAS, Key: "x", ExpectAbsent: true, Value: "2"}, Result{Code: CASFailed, Value: "1"}},
+		{Command{Kind: CAS, Key: "x", ExpectAbsent: true, Value: "2"}, Result{Code: CASFailed, Found: true, Value: "1"}},
 		{Command{Kind: CAS, Key: "x", Expect: "1", Value: "2"}, Result{Code: OK}},
-		{Command{Kind: Get, Key: "x"}, Result{Code: OK, Value: "2"}},
+		{Command{Kind: Get, Key: "x"}, Result{Code: OK, Found: true, Value: "2"}},
 		{Command{Kind: Put, Key: "x", Value: ""}, Result{Code: OK}},
-		{Command{Kind: Get, Key: "x"}, Result{Code: OK, Value: ""}},
+		{Command{Kind: Get, Key: "x"}, Result{Code: OK, Found: true, Value: ""}},
 		{Command{Kind: CAS, Key: "x", Expect: "", Value: "3"}, Result{Code: OK}},
-		{Command{Kind: Delete, Key: "x"}, Result{Code: OK}},
+		{Command{Kind: Delete, Key: "x"}, Result{Code: OK, Found: true, Value: "3"}},
 		{Command{Kind: Get, Key: "x"}, Result{Code: NotFound}},
 	}
 	for i, s := range steps {
@@ -186,7 +186,7 @@ func TestSnapshotRoundTripAndDeterminism(t *testing.T) {
 }
 
 func TestResultCodec(t *testing.T) {
-	r := Result{Code: CASFailed, Value: "cur", Session: 3}
+	r := Result{Code: CASFailed, Found: true, Value: "cur", Session: 3}
 	var e raft.Encoder
 	EncodeResult(&e, r)
 	d := raft.NewDecoder(e.B)

@@ -158,8 +158,12 @@ func (c Code) String() string {
 // Result is what a command returned.
 type Result struct {
 	Code Code
-	// Value is the value read by Get, or the current value when a CAS
-	// fails (empty if the key is absent).
+	// Found and Value describe the key as the command found it: for Get,
+	// for Delete (the value removed) and for a CAS that failed. Every
+	// outcome that depends on the key's state therefore reveals that
+	// state, which lets the linearizability checker discard writes of
+	// values that nobody ever observed (see internal/lincheck).
+	Found bool
 	Value string
 	// Session is the new session's ID, for Register.
 	Session uint64
@@ -169,8 +173,8 @@ func (r Result) String() string {
 	switch {
 	case r.Session != 0:
 		return fmt.Sprintf("ok session=%d", r.Session)
-	case r.Code == OK && r.Value != "":
-		return fmt.Sprintf("ok %q", r.Value)
+	case r.Found:
+		return fmt.Sprintf("%v %q", r.Code, r.Value)
 	}
 	return r.Code.String()
 }
@@ -178,13 +182,14 @@ func (r Result) String() string {
 // EncodeResult appends r.
 func EncodeResult(e *raft.Encoder, r Result) {
 	e.Byte(byte(r.Code))
+	e.Bool(r.Found)
 	e.Bytes([]byte(r.Value))
 	e.Uvarint(r.Session)
 }
 
 // DecodeResult reads a Result.
 func DecodeResult(d *raft.Decoder) Result {
-	return Result{Code: Code(d.Byte()), Value: string(d.Bytes()), Session: d.Uvarint()}
+	return Result{Code: Code(d.Byte()), Found: d.Bool(), Value: string(d.Bytes()), Session: d.Uvarint()}
 }
 
 type session struct {
@@ -272,7 +277,7 @@ func (s *Store) exec(c Command) Result {
 		if !ok {
 			return Result{Code: NotFound}
 		}
-		return Result{Code: OK, Value: cur}
+		return Result{Code: OK, Found: true, Value: cur}
 	case Put:
 		s.data[c.Key] = c.Value
 		return Result{Code: OK}
@@ -281,10 +286,10 @@ func (s *Store) exec(c Command) Result {
 			return Result{Code: NotFound}
 		}
 		delete(s.data, c.Key)
-		return Result{Code: OK}
+		return Result{Code: OK, Found: true, Value: cur}
 	case CAS:
 		if c.ExpectAbsent && ok || !c.ExpectAbsent && (!ok || cur != c.Expect) {
-			return Result{Code: CASFailed, Value: cur}
+			return Result{Code: CASFailed, Found: ok, Value: cur}
 		}
 		s.data[c.Key] = c.Value
 		return Result{Code: OK}

@@ -1,18 +1,39 @@
 // Package lincheck decides whether a concurrent history is linearizable.
 //
 // The search is the algorithm of Wing and Gong as improved by Lowe ("Testing
-// for linearizability", 2017): walk a doubly linked list of call and return
-// events, tentatively linearize any operation whose call is reached, and
-// backtrack when the return of an operation that has not been linearized is
-// reached. A cache of (set of linearized operations, model state) pairs that
-// have already been explored prunes the search; the set is hashed
-// incrementally with Zobrist hashing so a step costs O(1) apart from the
-// cache insertion.
+// for linearizability", 2017): keep the call and return events in a doubly
+// linked list ordered by time; at each step any operation whose call comes
+// before the first remaining return may be linearized next; when no choice
+// works, backtrack. A cache of configurations already explored, each a set
+// of linearized operations and a model state, prunes the search. Sets are
+// hashed incrementally with Zobrist keys.
 //
-// Operations whose outcome is unknown (a write that timed out) have their
-// return placed at infinity: they may be linearized at any point after
-// their call, or not at all. The search succeeds as soon as every operation
-// with a known outcome has been linearized.
+// Operations whose outcome is unknown (a write that timed out) may take
+// effect at any point after their call, or not at all. If nothing bounds
+// them their return is at infinity, and the search succeeds as soon as
+// every operation with a known outcome has been linearized. An unknown
+// operation can also carry a bound: "if it took effect at all, it did so
+// before time R" (a client session provides one, see CheckKV). Reaching
+// that bound without having linearized the operation is a move of its own:
+// deciding that it never takes effect.
+//
+// Unknown operations are what makes real histories expensive: every one of
+// them that is pending can be applied at any point, and the configurations
+// that differ only in when an overwritten unknown write was applied are all
+// distinct. Four refinements keep this in check, each justified by an
+// exchange argument (every completion of the pruned branch maps to a
+// completion of a branch that is kept):
+//
+//   - an unknown operation is never applied where it would not change the
+//     state: leaving it pending can do everything applying it can;
+//   - among pending unknown operations with the same effect (Model.EffectKey)
+//     only the one with the earliest bound is applied: any use of another
+//     one can be swapped for it;
+//   - moves are tried with known operations first, so configurations that
+//     have not spent an unknown operation are explored first;
+//   - a configuration is pruned if a failed one had linearized the same
+//     known operations, reached the same state and decided a subset of its
+//     unknown operations.
 //
 // The KV checker (kv.go) partitions a history by key and checks each key
 // separately, which is sound because linearizability is local (Herlihy and
@@ -23,7 +44,6 @@ package lincheck
 import (
 	"fmt"
 	"math"
-	"math/bits"
 	"sort"
 )
 
@@ -37,7 +57,14 @@ type Model[S comparable, O any] struct {
 	// possible.
 	Step func(s S, op O, unknown bool) (ok bool, next S)
 	Hash func(s S) uint64
-	// Describe renders a state and an operation for explanations.
+	// EffectKey, if set, returns a key such that two operations with the
+	// same non-empty key have the same effect on every state. Among
+	// interchangeable pending operations of unknown outcome only the one
+	// with the earliest bound is ever applied, which removes the
+	// symmetric branches of the search.
+	EffectKey func(op O) string
+	// DescribeState and DescribeOp render states and operations for
+	// explanations.
 	DescribeState func(s S) string
 	DescribeOp    func(op O) string
 }
@@ -46,11 +73,14 @@ type Model[S comparable, O any] struct {
 // total order of events (timestamps or sequence numbers). Operation a
 // precedes b in real time if a.Return < b.Call.
 type Event[O any] struct {
-	Op      O
-	Client  int
-	Call    int64
-	Return  int64
-	Unknown bool // outcome not observed; Return is ignored
+	Op     O
+	Client int
+	Call   int64
+	Return int64
+	// Unknown marks an operation whose outcome was not observed. Its
+	// Return, if not zero, bounds when it can have taken effect; zero
+	// means no bound.
+	Unknown bool
 }
 
 // Verdict is the outcome of a check.
@@ -78,34 +108,27 @@ func (v Verdict) String() string {
 // Result describes the outcome of checking one history.
 type Result struct {
 	Verdict Verdict
-	// Steps is the number of search steps taken.
+	// Steps is the number of moves tried.
 	Steps int
 	// Explanation is set for a violation: the longest linearizable prefix
-	// found and the operation that could not be placed after it.
+	// found and the operations that could not be placed after it.
 	Explanation string
 }
 
 type entry struct {
-	op     int
-	call   bool
-	time   int64
-	match  *entry
-	prev   *entry
-	next   *entry
-	unknwn bool
+	op      int
+	call    bool
+	time    int64
+	match   *entry
+	prev    *entry
+	next    *entry
+	unknown bool
 }
 
 type bitset []uint64
 
 func (b bitset) set(i int)   { b[i/64] |= 1 << (uint(i) % 64) }
 func (b bitset) clear(i int) { b[i/64] &^= 1 << (uint(i) % 64) }
-func (b bitset) count() int {
-	n := 0
-	for _, w := range b {
-		n += bits.OnesCount64(w)
-	}
-	return n
-}
 
 func (b bitset) equal(c bitset) bool {
 	for i := range b {
@@ -124,28 +147,68 @@ func zobrist(i int) uint64 {
 	return z ^ (z >> 31)
 }
 
-type cached[S comparable] struct {
-	bits  bitset
+// config is one explored configuration.
+type config[S comparable] struct {
+	lin   bitset
 	state S
+	hk    uint64 // hash of the known operations and the state
+	// failed is set once every move from the configuration has been
+	// explored without success.
+	failed bool
 }
 
-// Check searches for a linearization of events under model m, taking at
-// most budget steps (no limit if budget <= 0).
+// subsumeWindow is how many failed configurations with the same known
+// operations and state a new configuration is compared with.
+const subsumeWindow = 32
+
+// subsumes reports whether a failed configuration with linearized set old
+// makes one with set cur pointless: the same known operations, and a
+// subset of cur's unknown ones.
+func subsumes(old, cur, unknownMask bitset) bool {
+	for i := range cur {
+		if (old[i]^cur[i])&^unknownMask[i] != 0 || old[i]&unknownMask[i]&^cur[i] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// move linearizes the operation of a call entry or, with skip, decides
+// that an unknown operation never takes effect.
+type move struct {
+	call *entry
+	skip bool
+}
+
+type frame[S comparable] struct {
+	moves []move
+	next  int
+	state S
+	taken move // the move that led to the child frame
+	cfg   *config[S]
+}
+
+// Check searches for a linearization of events under model m, trying at
+// most budget moves (no limit if budget <= 0).
 func Check[S comparable, O any](m Model[S, O], events []Event[O], budget int) Result {
 	n := len(events)
 	if n == 0 {
 		return Result{Verdict: Linearizable}
 	}
 	all := make([]*entry, 0, 2*n)
+	unknownMask := make(bitset, (n+63)/64)
 	for i, ev := range events {
-		c := &entry{op: i, call: true, time: ev.Call, unknwn: ev.Unknown}
+		c := &entry{op: i, call: true, time: ev.Call, unknown: ev.Unknown}
 		rt := ev.Return
-		if ev.Unknown {
+		if ev.Unknown && rt == 0 {
 			rt = math.MaxInt64
 		}
-		r := &entry{op: i, time: rt, unknwn: ev.Unknown}
+		r := &entry{op: i, time: rt, unknown: ev.Unknown}
 		c.match, r.match = r, c
 		all = append(all, c, r)
+		if ev.Unknown {
+			unknownMask.set(i)
+		}
 	}
 	// Calls sort before returns at equal times, which treats operations
 	// that touch as concurrent: never a false alarm.
@@ -162,111 +225,192 @@ func Check[S comparable, O any](m Model[S, O], events []Event[O], budget int) Re
 		prev = e
 	}
 
-	lift := func(e *entry) {
+	unlink := func(e *entry) {
 		e.prev.next = e.next
 		if e.next != nil {
 			e.next.prev = e.prev
 		}
-		r := e.match
-		r.prev.next = r.next
-		if r.next != nil {
-			r.next.prev = r.prev
-		}
 	}
-	unlift := func(e *entry) {
-		r := e.match
-		r.prev.next = r
-		if r.next != nil {
-			r.next.prev = r
-		}
+	relink := func(e *entry) {
 		e.prev.next = e
 		if e.next != nil {
 			e.next.prev = e
 		}
 	}
+	lift := func(c *entry) { unlink(c); unlink(c.match) }
+	unlift := func(c *entry) { relink(c.match); relink(c) }
 
-	type frame struct {
-		e     *entry
-		state S
+	// moves lists what may happen next: linearize an operation whose call
+	// precedes the first remaining return, or, if that return is the
+	// bound of an unknown operation, decide that it never happened. done
+	// is set when every operation with a known outcome is linearized.
+	moves := func() (out []move, done bool) {
+		var unknown []move
+		add := func(e *entry) {
+			if m.EffectKey != nil {
+				if k := m.EffectKey(events[e.op].Op); k != "" {
+					for i, u := range unknown {
+						if m.EffectKey(events[u.call.op].Op) == k {
+							if e.match.time < u.call.match.time {
+								unknown[i] = move{call: e}
+							}
+							return
+						}
+					}
+				}
+			}
+			unknown = append(unknown, move{call: e})
+		}
+		for e := head.next; e != nil; e = e.next {
+			if e.call {
+				if e.unknown {
+					add(e)
+				} else {
+					out = append(out, move{call: e})
+				}
+				continue
+			}
+			if e.unknown && e.time == math.MaxInt64 {
+				return nil, true
+			}
+			if e.unknown {
+				out = append(out, move{call: e.match, skip: true})
+			}
+			return append(out, unknown...), false
+		}
+		return nil, true
 	}
+
 	var (
 		lin      = make(bitset, (n+63)/64)
-		zob      uint64
-		cache    = map[uint64][]cached[S]{}
-		stack    []frame
-		state    = m.Init()
-		e        = head.next
+		zobK     uint64 // Zobrist hash of the known operations in lin
+		zobU     uint64 // ... and of the unknown ones
+		exact    = map[uint64][]*config[S]{}
+		failed   = map[uint64][]*config[S]{} // by known operations and state
 		steps    int
-		best     []int // deepest linearized prefix seen
-		bestStop *entry
-		bestSt   S
+		deepest  []move
+		deepSt   S
+		deepStop *entry
 	)
-	seen := func(h uint64, s S) bool {
-		for _, c := range cache[h] {
-			if c.state == s && c.bits.equal(lin) {
-				return true
+	// prune reports whether the configuration (lin, s) has been explored
+	// already or is subsumed by a failed one; otherwise it records it.
+	prune := func(s S) (*config[S], bool) {
+		hs := m.Hash(s)
+		h := zobK ^ zobU ^ hs
+		for _, c := range exact[h] {
+			if c.state == s && c.lin.equal(lin) {
+				return nil, true
 			}
 		}
-		cache[h] = append(cache[h], cached[S]{bits: append(bitset(nil), lin...), state: s})
-		return false
+		// Subsumption: only the most recent failures with the same known
+		// operations and state are compared, which bounds the cost of a
+		// step. Pruning less is always sound.
+		fs := failed[zobK^hs]
+		for i := len(fs) - 1; i >= 0 && i >= len(fs)-subsumeWindow; i-- {
+			c := fs[i]
+			if c.state == s && subsumes(c.lin, lin, unknownMask) {
+				return nil, true
+			}
+		}
+		c := &config[S]{lin: append(bitset(nil), lin...), state: s, hk: zobK ^ hs}
+		exact[h] = append(exact[h], c)
+		return c, false
+	}
+	mark := func(op int) {
+		lin.set(op)
+		if events[op].Unknown {
+			zobU ^= zobrist(op)
+		} else {
+			zobK ^= zobrist(op)
+		}
+	}
+	unmark := func(op int) {
+		lin.clear(op)
+		if events[op].Unknown {
+			zobU ^= zobrist(op)
+		} else {
+			zobK ^= zobrist(op)
+		}
 	}
 
-	for head.next != nil {
+	rootMoves, done := moves()
+	if done {
+		return Result{Verdict: Linearizable}
+	}
+	rootCfg, _ := prune(m.Init())
+	stack := []frame[S]{{moves: rootMoves, state: m.Init(), cfg: rootCfg}}
+	for {
+		f := &stack[len(stack)-1]
+		if f.next == len(f.moves) {
+			// Every move from here failed.
+			f.cfg.failed = true
+			failed[f.cfg.hk] = append(failed[f.cfg.hk], f.cfg)
+			if len(stack)-1 > len(deepest) || deepest == nil {
+				deepest = deepest[:0]
+				for _, fr := range stack[:len(stack)-1] {
+					deepest = append(deepest, fr.taken)
+				}
+				deepSt = f.state
+				deepStop = firstReturn(head)
+			}
+			stack = stack[:len(stack)-1]
+			if len(stack) == 0 {
+				return Result{Verdict: Violation, Steps: steps,
+					Explanation: explain(m, events, deepest, deepStop, deepSt)}
+			}
+			p := &stack[len(stack)-1]
+			unlift(p.taken.call)
+			unmark(p.taken.call.op)
+			continue
+		}
 		steps++
 		if budget > 0 && steps > budget {
 			return Result{Verdict: Inconclusive, Steps: steps}
 		}
-		if e.call {
-			ok, next := m.Step(state, events[e.op].Op, e.unknwn)
-			if ok {
-				lin.set(e.op)
-				z := zob ^ zobrist(e.op)
-				if !seen(z^m.Hash(next), next) {
-					stack = append(stack, frame{e: e, state: state})
-					state, zob = next, z
-					lift(e)
-					e = head.next
-					continue
-				}
-				lin.clear(e.op)
+		mv := f.moves[f.next]
+		f.next++
+		op := mv.call.op
+		next := f.state
+		if !mv.skip {
+			ok, s := m.Step(f.state, events[op].Op, events[op].Unknown)
+			if !ok || events[op].Unknown && s == f.state {
+				continue
 			}
-			e = e.next
+			next = s
+		}
+		mark(op)
+		cfg, pruned := prune(next)
+		if pruned {
+			unmark(op)
 			continue
 		}
-		// A return: the operation it ends must already be linearized,
-		// and it is not.
-		if e.unknwn {
-			// Only returns at infinity remain: every operation with a
-			// known outcome is linearized.
+		lift(mv.call)
+		f.taken = mv
+		ms, done := moves()
+		if done {
 			return Result{Verdict: Linearizable, Steps: steps}
 		}
-		if len(stack) >= len(best) {
-			best = best[:0]
-			for _, f := range stack {
-				best = append(best, f.e.op)
-			}
-			bestStop, bestSt = e, state
-		}
-		if len(stack) == 0 {
-			return Result{Verdict: Violation, Steps: steps, Explanation: explain(m, events, best, bestStop, bestSt)}
-		}
-		f := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		state = f.state
-		lin.clear(f.e.op)
-		zob ^= zobrist(f.e.op)
-		unlift(f.e)
-		e = f.e.next
+		stack = append(stack, frame[S]{moves: ms, state: next, cfg: cfg})
 	}
-	return Result{Verdict: Linearizable, Steps: steps}
 }
 
-func explain[S comparable, O any](m Model[S, O], events []Event[O], best []int, stop *entry, st S) string {
+func firstReturn(head *entry) *entry {
+	for e := head.next; e != nil; e = e.next {
+		if !e.call {
+			return e
+		}
+	}
+	return nil
+}
+
+func explain[S comparable, O any](m Model[S, O], events []Event[O], best []move, stop *entry, st S) string {
 	describe := func(i int) string {
 		ev := events[i]
 		ret := fmt.Sprint(ev.Return)
-		if ev.Unknown {
+		if ev.Unknown && ev.Return == 0 {
 			ret = "?"
+		} else if ev.Unknown {
+			ret = "?<=" + ret
 		}
 		d := fmt.Sprintf("%v", ev.Op)
 		if m.DescribeOp != nil {
@@ -281,20 +425,22 @@ func explain[S comparable, O any](m Model[S, O], events []Event[O], best []int, 
 		return fmt.Sprintf("%v", s)
 	}
 	var b []byte
-	b = fmt.Appendf(b, "longest linearizable prefix (%d of %d operations):\n", len(best), len(events))
+	b = fmt.Appendf(b, "longest linearizable prefix found (%d of %d operations):\n", len(best), len(events))
 	s := m.Init()
-	for _, i := range best {
+	in := map[int]bool{}
+	for _, mv := range best {
+		i := mv.call.op
+		in[i] = true
+		if mv.skip {
+			b = fmt.Appendf(b, "  %s  never took effect\n", describe(i))
+			continue
+		}
 		_, s = m.Step(s, events[i].Op, events[i].Unknown)
 		b = fmt.Appendf(b, "  %s  -> %s\n", describe(i), desc(s))
 	}
 	if stop != nil {
-		b = fmt.Appendf(b, "no operation can be linearized next. The earliest pending return is\n  %s\n", describe(stop.op))
-		b = fmt.Appendf(b, "which is impossible in state %s, and no other pending operation leads to a state where it is.\n", desc(st))
-		b = fmt.Appendf(b, "operations that had been invoked but not linearized at that point:\n")
-		in := map[int]bool{}
-		for _, i := range best {
-			in[i] = true
-		}
+		b = fmt.Appendf(b, "in state %s nothing can be linearized before the return of\n  %s\n", desc(st), describe(stop.op))
+		b = fmt.Appendf(b, "operations invoked by then and not linearized:\n")
 		var pending []int
 		for i, ev := range events {
 			if !in[i] && ev.Call <= stop.time {

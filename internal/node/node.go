@@ -368,7 +368,7 @@ func (n *Node) serveReads() {
 		}
 		res := kv.Result{Code: kv.NotFound}
 		if v, ok := n.sm.Read(w.key); ok {
-			res = kv.Result{Code: kv.OK, Value: v}
+			res = kv.Result{Code: kv.OK, Found: true, Value: v}
 		}
 		n.respond(Response{ID: w.id, Status: StatusOK, Result: res, Index: w.index})
 	}

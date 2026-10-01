@@ -13,30 +13,48 @@ func put(c int, call, ret int64, k, v string) Op {
 	return Op{Client: c, Call: call, Return: ret, Cmd: kv.Command{Kind: kv.Put, Key: k, Value: v}, Result: kv.Result{Code: kv.OK}}
 }
 
-func get(c int, call, ret int64, k, v string) Op {
-	o := Op{Client: c, Call: call, Return: ret, Cmd: kv.Command{Kind: kv.Get, Key: k}, Result: kv.Result{Code: kv.OK, Value: v}}
+// found describes a key's state as a result reveals it; "<absent>" means
+// the key did not exist.
+func found(code kv.Code, v string) kv.Result {
 	if v == "<absent>" {
-		o.Result = kv.Result{Code: kv.NotFound}
+		return kv.Result{Code: code}
 	}
-	return o
+	return kv.Result{Code: code, Found: true, Value: v}
 }
 
-func del(c int, call, ret int64, k string, existed bool) Op {
-	o := Op{Client: c, Call: call, Return: ret, Cmd: kv.Command{Kind: kv.Delete, Key: k}, Result: kv.Result{Code: kv.OK}}
-	if !existed {
+func get(c int, call, ret int64, k, v string) Op {
+	o := Op{Client: c, Call: call, Return: ret, Cmd: kv.Command{Kind: kv.Get, Key: k}, Result: found(kv.OK, v)}
+	if v == "<absent>" {
 		o.Result.Code = kv.NotFound
 	}
 	return o
 }
 
-func cas(c int, call, ret int64, k, expect, v string, ok bool) Op {
+// del records a delete that found old ("<absent>" for not-found).
+func del(c int, call, ret int64, k string, old string) Op {
+	o := Op{Client: c, Call: call, Return: ret, Cmd: kv.Command{Kind: kv.Delete, Key: k}, Result: found(kv.OK, old)}
+	if old == "<absent>" {
+		o.Result.Code = kv.NotFound
+	}
+	return o
+}
+
+// cas records a successful cas, or with cur != "" a failed one that found
+// cur.
+func cas(c int, call, ret int64, k, expect, v string, cur string) Op {
 	o := Op{Client: c, Call: call, Return: ret, Cmd: kv.Command{Kind: kv.CAS, Key: k, Expect: expect, Value: v}, Result: kv.Result{Code: kv.OK}}
 	if expect == "<absent>" {
 		o.Cmd.Expect, o.Cmd.ExpectAbsent = "", true
 	}
-	if !ok {
-		o.Result.Code = kv.CASFailed
+	if cur != "" {
+		o.Result = found(kv.CASFailed, cur)
 	}
+	return o
+}
+
+func bounded(o Op, by int64) Op {
+	o = unknown(o)
+	o.Return = by
 	return o
 }
 
@@ -54,7 +72,8 @@ func TestKnownHistories(t *testing.T) {
 		want Verdict
 	}{
 		{"empty", nil, Linearizable},
-		{"sequential", []Op{put(1, 0, 1, "x", "a"), get(2, 2, 3, "x", "a"), del(1, 4, 5, "x", true), get(2, 6, 7, "x", "<absent>")}, Linearizable},
+		{"sequential", []Op{put(1, 0, 1, "x", "a"), get(2, 2, 3, "x", "a"), del(1, 4, 5, "x", "a"), get(2, 6, 7, "x", "<absent>")}, Linearizable},
+		{"delete must report the value it removed", []Op{put(1, 0, 1, "x", "a"), del(1, 4, 5, "x", "b")}, Violation},
 		{"read of initial state", []Op{get(1, 0, 1, "x", "<absent>")}, Linearizable},
 		{"read of a value never written", []Op{get(1, 0, 1, "x", "zzz")}, Violation},
 		{"concurrent read may see the write", []Op{put(1, 0, 10, "x", "a"), get(2, 1, 2, "x", "a")}, Linearizable},
@@ -69,11 +88,19 @@ func TestKnownHistories(t *testing.T) {
 			Violation,
 		},
 		{"new-old overlapping reads are fine", []Op{put(1, 0, 1, "x", "old"), put(1, 2, 20, "x", "new"), get(2, 3, 6, "x", "new"), get(3, 5, 7, "x", "old")}, Linearizable},
-		{"two cas from the same value both succeed", []Op{put(1, 0, 1, "x", "0"), cas(2, 2, 10, "x", "0", "a", true), cas(3, 2, 10, "x", "0", "b", true)}, Violation},
-		{"one of two cas succeeds", []Op{put(1, 0, 1, "x", "0"), cas(2, 2, 10, "x", "0", "a", true), cas(3, 2, 10, "x", "0", "b", false), get(1, 11, 12, "x", "a")}, Linearizable},
-		{"cas failure must be justified", []Op{put(1, 0, 1, "x", "0"), cas(2, 2, 3, "x", "0", "a", false)}, Violation},
-		{"cas on absent key", []Op{cas(1, 0, 1, "x", "<absent>", "a", true), cas(2, 2, 3, "x", "<absent>", "b", false), get(1, 4, 5, "x", "a")}, Linearizable},
-		{"delete of absent key must report not-found", []Op{del(1, 0, 1, "x", true)}, Violation},
+		{"two cas from the same value both succeed", []Op{put(1, 0, 1, "x", "0"), cas(2, 2, 10, "x", "0", "a", ""), cas(3, 2, 10, "x", "0", "b", "")}, Violation},
+		{"one of two cas succeeds", []Op{put(1, 0, 1, "x", "0"), cas(2, 2, 10, "x", "0", "a", ""), cas(3, 2, 10, "x", "0", "b", "a"), get(1, 11, 12, "x", "a")}, Linearizable},
+		{"cas failure must be justified", []Op{put(1, 0, 1, "x", "0"), cas(2, 2, 3, "x", "0", "a", "0")}, Violation},
+		{"cas failure must report the current value", []Op{put(1, 0, 1, "x", "0"), cas(2, 2, 3, "x", "9", "a", "1")}, Violation},
+		{"cas on absent key", []Op{cas(1, 0, 1, "x", "<absent>", "a", ""), cas(2, 2, 3, "x", "<absent>", "b", "a"), get(1, 4, 5, "x", "a")}, Linearizable},
+		{"delete of absent key must report not-found", []Op{del(1, 0, 1, "x", "a")}, Violation},
+		{
+			// The unknown cas can only have failed (nothing was ever
+			// "0"), so the observed "b" must come from the put.
+			"unobserved timed-out writes are dropped",
+			[]Op{unknown(put(1, 0, 0, "x", "never-seen")), unknown(cas(2, 0, 0, "x", "0", "also-never", "")), put(3, 1, 2, "x", "b"), get(4, 3, 4, "x", "b")},
+			Linearizable,
+		},
 		{"timed-out write observed later", []Op{unknown(put(1, 0, 0, "x", "a")), get(2, 5, 6, "x", "a")}, Linearizable},
 		{"timed-out write never observed", []Op{unknown(put(1, 0, 0, "x", "a")), get(2, 5, 6, "x", "<absent>")}, Linearizable},
 		{"timed-out write observed before it was issued", []Op{get(2, 0, 1, "x", "a"), unknown(put(1, 5, 0, "x", "a"))}, Violation},
@@ -81,6 +108,21 @@ func TestKnownHistories(t *testing.T) {
 		{
 			"timed-out write may land after a later write",
 			[]Op{unknown(put(1, 0, 0, "x", "a")), put(2, 1, 2, "x", "b"), get(3, 3, 4, "x", "b"), get(3, 5, 6, "x", "a")},
+			Linearizable,
+		},
+		{
+			"bounded timed-out write observed after its bound",
+			[]Op{bounded(put(1, 0, 0, "x", "a"), 3), get(2, 5, 6, "x", "<absent>"), get(2, 7, 8, "x", "a")},
+			Violation,
+		},
+		{
+			"bounded timed-out write observed before its bound",
+			[]Op{bounded(put(1, 0, 0, "x", "a"), 3), get(2, 1, 2, "x", "a"), get(2, 7, 8, "x", "a")},
+			Linearizable,
+		},
+		{
+			"bounded timed-out write that never happened",
+			[]Op{bounded(put(1, 0, 0, "x", "a"), 3), put(3, 4, 5, "x", "b"), get(2, 5, 6, "x", "b"), get(2, 7, 8, "x", "b")},
 			Linearizable,
 		},
 		{"keys are independent", []Op{put(1, 0, 1, "x", "a"), get(2, 2, 3, "y", "<absent>"), get(2, 4, 5, "x", "a")}, Linearizable},
@@ -107,16 +149,31 @@ func TestUnknownGetsAreDropped(t *testing.T) {
 }
 
 func TestBudget(t *testing.T) {
-	// Many concurrent unknown writes and a final read that matches none
-	// of them: the search must explore every subset before giving up.
-	var ops []Op
-	for i := 0; i < 40; i++ {
-		ops = append(ops, unknown(put(i, 0, 0, "x", fmt.Sprint(i))))
+	// A counter with many concurrent increments of unknown outcome and a
+	// final read no subset of them explains: the search has to try every
+	// subset before it can give up.
+	type op struct{ read int }
+	m := Model[int, op]{
+		Init: func() int { return 0 },
+		Step: func(s int, o op, unknown bool) (bool, int) {
+			if o.read != 0 {
+				return o.read == s, s
+			}
+			return true, s + 1
+		},
+		Hash: func(s int) uint64 { return uint64(s) },
 	}
-	ops = append(ops, get(99, 1, 2, "x", "nope"))
-	rep := CheckKV(ops, 1000)
-	if rep.Verdict != Inconclusive {
-		t.Fatalf("verdict %v", rep.Verdict)
+	var evs []Event[op]
+	for i := 0; i < 40; i++ {
+		evs = append(evs, Event[op]{Call: 0, Unknown: true})
+	}
+	evs = append(evs, Event[op]{Op: op{read: -1}, Call: 1, Return: 2})
+	if res := Check(m, evs, 1000); res.Verdict != Inconclusive {
+		t.Fatalf("verdict %v", res.Verdict)
+	}
+	evs = append(evs[:12], Event[op]{Op: op{read: 7}, Call: 1, Return: 2})
+	if res := Check(m, evs, 0); res.Verdict != Linearizable {
+		t.Fatalf("verdict %v for a read of 7 after 12 possible increments", res.Verdict)
 	}
 }
 
@@ -150,7 +207,8 @@ func bruteForce(ops []Op) bool {
 				}
 				minimal := true
 				for j, x := range ops {
-					if j != i && !used[j] && !skip[j] && !x.Unknown && x.Return < o.Call {
+					bounded := !x.Unknown || x.Return != 0
+					if j != i && !used[j] && !skip[j] && bounded && x.Return < o.Call {
 						minimal = false
 						break
 					}
@@ -180,6 +238,12 @@ func bruteForce(ops []Op) bool {
 func randomOp(rng *prng.Rand, client int) Op {
 	vals := []string{"a", "b", "c"}
 	v := vals[rng.Intn(len(vals))]
+	state := func() string {
+		if rng.Chance(1, 3) {
+			return "<absent>"
+		}
+		return vals[rng.Intn(len(vals))]
+	}
 	call := int64(rng.Intn(20))
 	ret := call + int64(rng.Intn(8))
 	var o Op
@@ -187,21 +251,23 @@ func randomOp(rng *prng.Rand, client int) Op {
 	case 0:
 		o = put(client, call, ret, "k", v)
 	case 1:
-		if rng.Chance(1, 3) {
-			v = "<absent>"
-		}
-		o = get(client, call, ret, "k", v)
+		o = get(client, call, ret, "k", state())
 	case 2:
-		o = del(client, call, ret, "k", rng.Chance(1, 2))
+		o = del(client, call, ret, "k", state())
 	default:
-		e := vals[rng.Intn(len(vals))]
-		if rng.Chance(1, 4) {
-			e = "<absent>"
+		e := state()
+		cur := ""
+		if rng.Chance(1, 2) {
+			cur = state()
 		}
-		o = cas(client, call, ret, "k", e, v, rng.Chance(1, 2))
+		o = cas(client, call, ret, "k", e, v, cur)
 	}
 	if o.Cmd.Kind != kv.Get && rng.Chance(1, 5) {
+		r := o.Return
 		o = unknown(o)
+		if rng.Chance(1, 2) {
+			o.Return = r // bounded: took effect by r or never
+		}
 	}
 	return o
 }
@@ -212,8 +278,8 @@ func TestAgreesWithBruteForce(t *testing.T) {
 	const seed = 20261001
 	rng := prng.New(seed)
 	counts := map[bool]int{}
-	for iter := 0; iter < 3000; iter++ {
-		n := 1 + rng.Intn(6)
+	for iter := 0; iter < 4000; iter++ {
+		n := 1 + rng.Intn(7)
 		ops := make([]Op, n)
 		for i := range ops {
 			ops[i] = randomOp(rng, i)
@@ -255,12 +321,15 @@ func genLinearizable(rng *prng.Rand, n, clients int) []Op {
 		case 0:
 			o = put(c, call, ret, k, v)
 		case 1:
-			o = get(c, call, ret, k, cur.String())
+			o = get(c, call, ret, k, "<absent>")
 			if cur.present {
-				o.Result.Value = cur.value
+				o = get(c, call, ret, k, cur.value)
 			}
 		case 2:
-			o = del(c, call, ret, k, cur.present)
+			o = del(c, call, ret, k, "<absent>")
+			if cur.present {
+				o = del(c, call, ret, k, cur.value)
+			}
 		default:
 			e := cur.value
 			if rng.Chance(1, 3) {
@@ -269,7 +338,7 @@ func genLinearizable(rng *prng.Rand, n, clients int) []Op {
 			if !cur.present {
 				e = "<absent>"
 			}
-			o = cas(c, call, ret, k, e, v, true)
+			o = cas(c, call, ret, k, e, v, "")
 		}
 		skip := false
 		if o.Cmd.Kind != kv.Get && rng.Chance(1, 6) {
@@ -283,10 +352,7 @@ func genLinearizable(rng *prng.Rand, n, clients int) []Op {
 				ok, _ := stepKV(cur, o, false)
 				if !ok {
 					// The CAS did not match: record the failure.
-					o.Result = kv.Result{Code: kv.CASFailed}
-					if cur.present {
-						o.Result.Value = cur.value
-					}
+					o.Result = kv.Result{Code: kv.CASFailed, Found: cur.present, Value: cur.value}
 				}
 			}
 			s[k] = next
@@ -307,7 +373,7 @@ func TestRandomLinearizableHistories(t *testing.T) {
 		// Corrupt one read so that it returns a value nobody wrote.
 		for i := range ops {
 			if ops[i].Cmd.Kind == kv.Get && !ops[i].Unknown {
-				ops[i].Result = kv.Result{Code: kv.OK, Value: "never-written"}
+				ops[i].Result = kv.Result{Code: kv.OK, Found: true, Value: "never-written"}
 				break
 			}
 		}
