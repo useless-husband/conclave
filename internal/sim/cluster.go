@@ -41,6 +41,9 @@ type simNode struct {
 	lastTerm   uint64
 	lastVote   raft.NodeID
 	lastCommit uint64
+	// commitTerm is the last term in which this server, as leader,
+	// advanced its commit index.
+	commitTerm uint64
 
 	// outbox holds the messages sent within the last sendWindow; a crash
 	// loses some of them.
@@ -190,10 +193,16 @@ func (s *Sim) observe(n *simNode) {
 	voted := vote != raft.None && vote != n.id && (vote != n.lastVote || t != n.lastTerm)
 	elected := role == raft.Leader && (n.lastRole != raft.Leader || t != n.lastTerm)
 	committed := role == raft.Leader && commit > n.lastCommit
+	// A new leader's first commit is a transition of its own: it is when
+	// the leader decides what its predecessors left behind (Figure 8).
+	firstCommit := committed && n.commitTerm != t
+	if committed {
+		n.commitTerm = t
+	}
 	n.lastRole, n.lastTerm, n.lastVote, n.lastCommit = role, t, vote, commit
 	if s.chaos && (voted || elected || committed) {
 		p := s.prof.TransitionCrashPercent
-		if committed && !elected {
+		if committed && !elected && !firstCommit {
 			// A leader commits all the time; crash at a fraction of
 			// those moments.
 			p /= 8
