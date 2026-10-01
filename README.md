@@ -174,9 +174,10 @@ below).
 | `conf-change-before-term-commit`: propose a membership change before committing in the term (Ongaro, 2015) | 3,358 | state-machine safety |
 
 All ten together took 314 s on four workers. The two expensive ones need a
-precise sequence of crashes: Figure 8 needs a leader to die with an
-uncommitted entry, a second leader to die with a different one at the same
-index, and the first to come back and die again between two acknowledgements.
+precise interleaving. For Figure 8, an entry of an old term must reach a
+majority only after a leader of a later term has written a different entry
+at the same index, and the leader that counted those replicas must lose
+leadership before any entry of its own term is stored on a majority.
 The membership bug, which `TestOngaro2015MembershipBug` also replays step by
 step, needs two overlapping reconfigurations by leaders of different terms.
 Neither was found in 2,000 seeds until the simulator learned to lose a
@@ -240,9 +241,9 @@ writes end with an unknown outcome while a leader is being replaced:
   client sessions that make a retried write take effect exactly once.
 - **Simulator** (`internal/sim`): discrete-event, single-threaded, every
   decision from one seed; each seed draws its own fault profile. It crashes
-  servers right after protocol transitions (granting a vote, becoming leader)
-  and, in power-loss crashes, drops the messages the server had just sent,
-  because random timing rarely hits those windows.
+  servers right after protocol transitions (granting a vote, becoming leader,
+  a new leader's first commit) and, in power-loss crashes, drops the messages
+  the server had just sent, because random timing rarely hits those windows.
 - **Checker** (`internal/lincheck`): Wing–Gong–Lowe search with memoization,
   partitioned per key, with sound reductions for operations of unknown
   outcome; cross-checked against brute-force enumeration.

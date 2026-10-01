@@ -203,8 +203,13 @@ moments where Raft bugs live:
 
 - **Crashes at protocol transitions.** With some probability a server
   crashes within a few milliseconds of granting a vote, becoming leader, or
-  (rarely) advancing its commit index, and restarts quickly. Before this
-  existed, `vote-not-persisted` was not detected in the first 200 seeds.
+  making its first commit as leader in a term (and, more rarely, at any later
+  commit), and restarts quickly. Before this existed, `vote-not-persisted`
+  was not detected in the first 200 seeds. The first-commit transition was
+  added last: once client requests stopped being duplicated (see below), the
+  Figure 8 mutation was no longer found in 14,000 seeds, because the moment
+  that matters, a new leader deciding what its predecessors left behind, was
+  rarely hit by chance.
 - **Lost send buffers.** Half the crashes are power losses, which also lose
   the messages the server sent in the last two milliseconds: a machine that
   loses power takes its socket buffers with it (a killed process does not, so
