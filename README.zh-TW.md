@@ -1,0 +1,129 @@
+# conclave
+
+**從零寫的 Raft 上建立的複寫式、線性一致的鍵值資料庫；用確定性模擬器在可重現的故障下執行真正的伺服器程式碼，並檢查每一次執行的線性一致性。**
+
+[English](README.md) · [設計文件（英文）](docs/DESIGN.md) · [導讀（給初學者）](docs/導讀.zh-TW.md)
+
+GitHub 上有幾百個 Raft 實作，大多用幾個寫好的情境來測，只能證明「沒出事時程式會動」。
+conclave 的重點是證明「出事時也是對的」：
+
+- **在模擬的災難下跑真正的程式碼。** 共識核心、請求處理路徑、預寫日誌（WAL）和狀態機自己不開
+  goroutine、不讀時鐘、不做 I/O。`conclave` 執行檔用 TCP、硬碟和真實時鐘驅動它們；模擬器則在單一
+  goroutine 裡驅動**同一份程式碼**：模擬網路（延遲、遺失、重複、亂序、對稱與單向分割）、模擬硬碟
+  （當機只保留已 fsync 的位元組，最後一筆可能寫一半，當機可以發生在寫入、fsync 或 rename 的中途）、
+  當機、暫停、成員變更和客戶端負載，全部由一個種子決定。同一個種子得到逐位元相同的執行。
+- **每次執行都檢查。** 執行中檢查選舉安全性與狀態機安全性；所有故障修復後檢查活性；檢查各副本一致；
+  並用本專案自己寫的檢查器驗證每個客戶端操作的線性一致性，包括客戶端不知道結果的寫入。
+- **檢查是有牙齒的。** 十種「把真正程式碼的某一行改錯」的經典 Raft 錯誤只能從測試中開啟，
+  模擬器在有限的種子數內全部抓到，下表列出各需要幾個種子。
+- **真的找到過 bug。** 開發期間模擬器找到一個 WAL 復原的 bug：在不巧的時機當機後，兩次重開之後可能
+  默默丟掉已確認的寫入（[細節](docs/DESIGN.md#4-the-write-ahead-log)）。
+
+只用 Go 標準函式庫。約 9,000 行 Go 程式加 3,500 行測試。
+
+## 試用
+
+```console
+$ scripts/cluster.sh start          # 建置並在 127.0.0.1 用隨機埠開 3 台，組成叢集
+cluster running: n1 pid 78069, n2 pid 78099, n3 pid 78117
+client addresses: 127.0.0.1:61697,127.0.0.1:61699,127.0.0.1:61701
+$ . .cluster/env
+$ .cluster/conclave put greeting hello
+ok
+$ .cluster/conclave get greeting
+hello
+$ .cluster/conclave cas greeting hello bonjour
+ok
+$ .cluster/conclave cas greeting hello hola
+conclave: cas failed: current value is "bonjour"
+$ .cluster/conclave delete greeting
+deleted (was "bonjour")
+$ scripts/cluster.sh kill 1         # 用 PID 送 SIGKILL 給領導者
+killed n1 (pid 78069)
+$ .cluster/conclave put survivor yes
+ok
+$ scripts/cluster.sh restart 1      # 同一個資料目錄、同一組埠
+n1 running again, pid 78176
+$ scripts/cluster.sh stop
+```
+
+HTTP API 和模擬器的完整範例請見英文 README。重播任一個種子：`go run ./cmd/conclave sim -seed 42 -trace`。
+
+## 結果
+
+### 每一種故意植入的 bug 都被抓到
+
+`go test ./internal/sim -run TestMutationsAreDetected -v` 會開啟一種 bug，從種子 1、2、3…一直跑到模擬器
+回報安全性違反為止，再用同一個種子在**沒有** bug 的情況下重跑一次，必須通過（排除是模擬器自己的問題）。
+超過上限（約為下表數字的兩倍）測試就失敗。
+
+{{MUTATIONS}}
+
+### 未修改的程式碼
+
+{{SWEEP}}
+
+### 真實行程
+
+`go test ./test/e2e -v` 會建置執行檔、開 3 台的叢集，用 6 個客戶端並行操作 20 秒，期間每 1 到 2.5 秒
+用 PID 對某一台送 SIGKILL（一半機率是領導者）並在原資料目錄重開，最後用同一個檢查器檢查記錄下來的歷史。
+把歷史中的一次讀取竄改後必須被判定違反，證明檢查不是空轉。
+
+{{E2E}}
+
+### 效能
+
+{{BENCH}}
+
+## 運作方式
+
+- **Raft**（`internal/raft`）：預投票、領導者黏著與 check-quorum 的選舉；管線化日誌複寫與快速衝突回退；
+  只用當前任期的條目決定提交（Figure 8）；快照與 InstallSnapshot；一次一台的成員變更（含 2015 年的修正）；
+  領導權交接；ReadIndex 讀取。`Flush` 一個函式定義耐久性規則：附加訊息可以在本地 fsync 之前送出，
+  投票與確認只能在 fsync 之後。
+- **預寫日誌**（`internal/wal`）：分段、每筆 CRC32C；復原時切掉最後一段被當機撕裂的寫入，其他地方損壞就拒絕啟動；
+  macOS 用 `F_FULLFSYNC`。
+- **狀態機**（`internal/kv`）：get、put、delete、compare-and-swap，以及讓重送的寫入只生效一次的 session。
+- **模擬器**（`internal/sim`）：離散事件、單執行緒，所有決定來自一個種子，每個種子抽一組不同的故障組合；
+  會在投票、當選等轉折點後刻意讓機器當機，並模擬斷電時剛送出的封包一起消失。
+- **檢查器**（`internal/lincheck`）：Wing–Gong–Lowe 搜尋加記憶化、按 key 分割，並對結果未知的操作做有證明的剪枝；
+  與暴力列舉交叉驗證。
+
+## 限制
+
+- **只在一台機器上量測。** 三個行程共用一顆 SSD，硬碟快取的 flush 會互相排隊；分散在不同機器上的數字會不同。
+  量測時這台機器同時在做其他工作。
+- **模擬器的涵蓋是統計性的。** 它抓到了所有植入的 bug 和一個真的 bug，但需要它不會產生的故障序列、
+  或需要比實際跑過更多種子的 bug 仍可能漏掉。最難的兩個植入 bug 需要上千個種子。
+- **不處理拜占庭故障**：已同步資料的靜默損壞只會被校驗碼偵測並停止伺服器，不會從其他副本修復。
+- **成員變更一次一台**（沒有 joint consensus），被移除的 ID 不可重用。
+- **兩個埠都沒有認證或 TLS**，只能綁在可信任的網路。
+- **只有領導者回答讀取**（ReadIndex），沒有 follower 讀取或租約。
+- **狀態機在記憶體中**，大小受限於 RAM，快照是完整複本。
+- 伺服器重開時必須回到加入時的位址。
+
+## 相關專案
+
+就我所知，同時附帶「對自己正式程式碼的確定性模擬器」、「獨立的線性一致性檢查器」和「實測的突變表」的開源
+Raft 實作不多；但這些想法本身都有前例：FoundationDB 的模擬測試、TigerBeetle 的 VOPR、etcd/raft 與
+hashicorp/raft、Jepsen/Knossos 與 Porcupine、MIT 6.5840 的 Raft 作業、Rust 的 MadSim 與 turmoil。
+各自與 conclave 的差異請見英文 README 的 Related work。姊妹專案 linproof 是另外以 Lean 證明的檢查器，conclave 不依賴它。
+
+## 建置與測試
+
+需要 Go 1.23 以上，沒有其他相依套件。
+
+```sh
+make build        # bin/conclave
+make short        # 單元測試、短的種子掃描、短的殺行程測試
+make test         # 全部，包含突變表（數分鐘）
+make sweep SEEDS=1-10000 WORKERS=4
+make mutations    # 印出突變表
+make e2e          # 真實行程的殺掉重開測試
+make bench        # 效能表
+make lint         # gofmt、go vet、staticcheck
+```
+
+## 授權
+
+[MIT](LICENSE)
