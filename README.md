@@ -163,17 +163,17 @@ below).
 | injected bug (one line of the real code changed) | first failing seed | caught by |
 |---|---:|---|
 | `vote-without-log-check`: grant a vote without the "candidate's log is at least as up to date" check (§5.4.1) | 2 | state-machine safety, linearizability |
-| `commit-prior-term-by-count`: commit an old-term entry once a majority stores it (Figure 8) | 5,584 | state-machine safety |
-| `vote-not-persisted`: answer a vote request without first writing the vote to disk | 383 | election safety (two leaders in one term) |
+| `commit-prior-term-by-count`: commit an old-term entry once a majority stores it (Figure 8) | 3,397 | state-machine safety |
+| `vote-not-persisted`: answer a vote request without first writing the vote to disk | 282 | election safety (two leaders in one term), state-machine safety, linearizability |
 | `ack-before-fsync`: acknowledge appended entries (and count the leader's own copy) before fsync | 3 | state-machine safety |
-| `read-without-quorum`: serve a read from a leader without the ReadIndex heartbeat round | 74 | linearizability (a deposed leader's stale read) |
+| `read-without-quorum`: serve a read from a leader without the ReadIndex heartbeat round | 101 | linearizability (a deposed leader's stale read) |
 | `duplicate-apply`: ignore the session table, so a retried write is applied again | 1 | linearizability |
-| `skip-wal-checksum`: replay WAL records without verifying their checksum | 241 | state-machine safety (a torn record replayed as data) |
+| `skip-wal-checksum`: replay WAL records without verifying their checksum | 19 | state-machine safety (a torn record replayed as data) |
 | `skip-dir-sync`: do not fsync the directory after creating a WAL segment | 5 | state-machine safety, election safety, linearizability |
 | `truncate-without-marker`: install a leader's snapshot without the record that voids the old log | 1 | recovery (the WAL no longer opens) |
-| `conf-change-before-term-commit`: propose a membership change before committing in the term (Ongaro, 2015) | 3,358 | state-machine safety |
+| `conf-change-before-term-commit`: propose a membership change before committing in the term (Ongaro, 2015) | 5,747 | state-machine safety, linearizability |
 
-All ten together took 314 s on four workers. The two expensive ones need a
+All ten together took 287 s on four workers. The two expensive ones need a
 precise interleaving. For Figure 8, an entry of an old term must reach a
 majority only after a leader of a later term has written a different entry
 at the same index, and the leader that counted those replicas must lose
@@ -181,8 +181,8 @@ leadership before any entry of its own term is stored on a majority.
 The membership bug, which `TestOngaro2015MembershipBug` also replays step by
 step, needs two overlapping reconfigurations by leaders of different terms.
 Neither was found in 2,000 seeds until the simulator learned to lose a
-crashing server's unsent messages (power loss) and to crash a leader just as
-it advances its commit index.
+crashing server's unsent messages (power loss) and to crash a new leader
+right after its first commit.
 
 ### The unmodified code
 

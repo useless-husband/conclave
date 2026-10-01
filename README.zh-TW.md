@@ -61,17 +61,17 @@ HTTP API 和模擬器的完整範例請見英文 README。重播任一個種子�
 | 植入的 bug（真正程式碼改錯一行） | 第一個失敗的種子 | 由什麼抓到 |
 |---|---:|---|
 | `vote-without-log-check`：投票時不檢查候選人日誌是否夠新（§5.4.1） | 2 | 狀態機安全性、線性一致性 |
-| `commit-prior-term-by-count`：舊任期的條目在過半數機器上就宣布定案（Figure 8） | 5,584 | 狀態機安全性 |
-| `vote-not-persisted`：投票前沒先把票寫進硬碟 | 383 | 選舉安全性（同一任期兩個領導者） |
+| `commit-prior-term-by-count`：舊任期的條目在過半數機器上就宣布定案（Figure 8） | 3,397 | 狀態機安全性 |
+| `vote-not-persisted`：投票前沒先把票寫進硬碟 | 282 | 選舉安全性（同一任期兩個領導者）、狀態機安全性、線性一致性 |
 | `ack-before-fsync`：fsync 之前就確認收到條目 | 3 | 狀態機安全性 |
-| `read-without-quorum`：領導者回答讀取前不做 ReadIndex 心跳確認 | 74 | 線性一致性（被取代的領導者讀到舊值） |
+| `read-without-quorum`：領導者回答讀取前不做 ReadIndex 心跳確認 | 101 | 線性一致性（被取代的領導者讀到舊值） |
 | `duplicate-apply`：忽略 session 表，重送的寫入再執行一次 | 1 | 線性一致性 |
-| `skip-wal-checksum`：重放 WAL 時不檢查校驗碼 | 241 | 狀態機安全性（寫一半的紀錄被當成資料） |
+| `skip-wal-checksum`：重放 WAL 時不檢查校驗碼 | 19 | 狀態機安全性（寫一半的紀錄被當成資料） |
 | `skip-dir-sync`：建立 WAL 分段檔後不 fsync 目錄 | 5 | 狀態機安全性、選舉安全性、線性一致性 |
 | `truncate-without-marker`：安裝領導者的快照時不寫作廢舊日誌的紀錄 | 1 | 復原失敗（WAL 打不開） |
-| `conf-change-before-term-commit`：還沒在本任期提交任何條目就提出成員變更（Ongaro 2015） | 3,358 | 狀態機安全性 |
+| `conf-change-before-term-commit`：還沒在本任期提交任何條目就提出成員變更（Ongaro 2015） | 5,747 | 狀態機安全性、線性一致性 |
 
-十種合計在 4 個 worker 上花 314 秒。最貴的兩種需要非常精準的當機順序；在模擬器學會「斷電時丟掉還沒送出的封包」和「領導者剛推進提交位置時當機」之前，兩者在 2,000 個種子內都沒被找到。
+十種合計在 4 個 worker 上花 287 秒。最貴的兩種需要非常精準的當機順序；在模擬器學會「斷電時丟掉還沒送出的封包」和「新領導者第一次提交後立刻當機」之前，兩者在 2,000 個種子內都沒被找到。
 成員變更的那個 bug 另外有 `TestOngaro2015MembershipBug` 一步一步重現。
 
 ### 未修改的程式碼

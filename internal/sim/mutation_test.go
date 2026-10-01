@@ -22,15 +22,15 @@ var (
 // a harness that lost its teeth fails it.
 var mutationBound = map[mutation.Mutation]int{
 	mutation.VoteWithoutLogCheck:        50,    // measured: seed 2
-	mutation.CommitPriorTermByCount:     12000, // measured: seed 5584
-	mutation.VoteNotPersisted:           1000,  // measured: seed 383
+	mutation.CommitPriorTermByCount:     7000,  // measured: seed 3397
+	mutation.VoteNotPersisted:           600,   // measured: seed 282
 	mutation.AckBeforeFsync:             50,    // measured: seed 3
-	mutation.ReadWithoutQuorum:          200,   // measured: seed 74
+	mutation.ReadWithoutQuorum:          250,   // measured: seed 101
 	mutation.DuplicateApply:             50,    // measured: seed 1
-	mutation.SkipWALChecksum:            600,   // measured: seed 241
+	mutation.SkipWALChecksum:            50,    // measured: seed 19
 	mutation.SkipDirSync:                50,    // measured: seed 5
 	mutation.TruncateWithoutMarker:      50,    // measured: seed 1
-	mutation.ConfChangeBeforeTermCommit: 7000,  // measured: seed 3358
+	mutation.ConfChangeBeforeTermCommit: 12000, // measured: seed 5747
 }
 
 // firstDetection runs seeds 1, 2, ... on four goroutines and returns the
