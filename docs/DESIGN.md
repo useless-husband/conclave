@@ -206,10 +206,14 @@ moments where Raft bugs live:
   crashes within a few milliseconds of granting a vote, becoming leader, or
   (rarely) advancing its commit index, and restarts quickly. Before this
   existed, `vote-not-persisted` was not detected in the first 200 seeds.
-- **Lost send buffers.** A crash also loses the messages the server sent in
-  the last two milliseconds, as a machine that loses power takes its socket
-  buffers with it. This is what lets a new leader die with its newest entries
-  existing only in its own log, the shape of the Figure 8 scenario.
+- **Lost send buffers.** Half the crashes are power losses, which also lose
+  the messages the server sent in the last two milliseconds: a machine that
+  loses power takes its socket buffers with it (a killed process does not, so
+  the other half keep them). This is what lets a new leader die with its
+  newest entries existing only in its own log, the shape of the Figure 8
+  scenario. An earlier version lost the buffer on every crash, which hid the
+  `ack-before-fsync` bug: its acknowledgements leave just before the fsync
+  the crash interrupts, so they were always lost with it.
 
 **What it checks.** During the run: at most one leader per term (election
 safety) and the same entry applied at every index by every server (state

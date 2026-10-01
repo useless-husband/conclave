@@ -165,8 +165,8 @@ rejected, so the check cannot pass vacuously.
 - **Simulator** (`internal/sim`): discrete-event, single-threaded, every
   decision from one seed; each seed draws its own fault profile. It crashes
   servers right after protocol transitions (granting a vote, becoming leader)
-  and drops the messages a crashing server had just sent, because random
-  timing rarely hits those windows.
+  and, in power-loss crashes, drops the messages the server had just sent,
+  because random timing rarely hits those windows.
 - **Checker** (`internal/lincheck`): Wing–Gong–Lowe search with memoization,
   partitioned per key, with sound reductions for operations of unknown
   outcome; cross-checked against brute-force enumeration.
