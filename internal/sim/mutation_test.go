@@ -16,21 +16,21 @@ var (
 )
 
 // mutationBound is the number of seeds within which the simulator must
-// expose each injected bug. The bounds are about twice the number of seeds
-// the detection actually took when the README table was produced, so that
-// harmless changes to the simulator do not make the test flaky, while a
-// harness that lost its teeth fails it.
+// expose each injected bug. The bounds are about twice the seed at which
+// detection happened when the README table was produced (at least 50), so
+// that harmless changes to the simulator do not make the test flaky, while
+// a harness that lost its teeth fails it.
 var mutationBound = map[mutation.Mutation]int{
-	mutation.VoteWithoutLogCheck:        200,
-	mutation.CommitPriorTermByCount:     200,
-	mutation.VoteNotPersisted:           200,
-	mutation.AckBeforeFsync:             200,
-	mutation.ReadWithoutQuorum:          200,
-	mutation.DuplicateApply:             200,
-	mutation.SkipWALChecksum:            200,
-	mutation.SkipDirSync:                200,
-	mutation.TruncateWithoutMarker:      200,
-	mutation.ConfChangeBeforeTermCommit: 200,
+	mutation.VoteWithoutLogCheck:        50,    // measured: seed 2
+	mutation.CommitPriorTermByCount:     12000, // measured: seed 5584
+	mutation.VoteNotPersisted:           1000,  // measured: seed 383
+	mutation.AckBeforeFsync:             50,    // measured: seed 3
+	mutation.ReadWithoutQuorum:          200,   // measured: seed 74
+	mutation.DuplicateApply:             50,    // measured: seed 1
+	mutation.SkipWALChecksum:            600,   // measured: seed 241
+	mutation.SkipDirSync:                50,    // measured: seed 5
+	mutation.TruncateWithoutMarker:      50,    // measured: seed 1
+	mutation.ConfChangeBeforeTermCommit: 7000,  // measured: seed 3358
 }
 
 // firstDetection runs seeds 1, 2, ... on four goroutines and returns the

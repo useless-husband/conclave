@@ -733,3 +733,76 @@ func TestMembershipApply(t *testing.T) {
 		t.Fatal("Contains")
 	}
 }
+
+// ongaro2015 replays the single-server membership bug reported by Diego
+// Ongaro on raft-dev in 2015. In C0 = {1,2,3,4}, n1 starts adding n5 but the
+// new configuration C1 reaches only n5. n2 wins term 2 and, before
+// committing anything of its own term, removes n1 (C2 = {2,3,4}) and commits
+// that with n3. n1 then wins term 3 with n4 and n5, a majority of C1, and
+// commits C1. Two different entries are committed at the same index.
+//
+// With the guard, n2 cannot propose C2 until it has committed an entry of
+// its term, which would need n4, whose vote n1 then could not get.
+func ongaro2015(t *testing.T, hook func(*Config)) (*testNet, error) {
+	n := newTestNet(t, 4, hook)
+	n.elect(1)
+	n.addEmpty(5)
+	n.drop = func(m Message) bool { return m.From == 1 && m.Type == MsgApp && m.To != 5 }
+	if _, _, err := n.nodes[1].ProposeConfChange(ConfChange{Type: AddNode, Node: 5}); err != nil {
+		t.Fatal(err)
+	}
+	n.run()
+	if got := len(n.nodes[5].Membership().Members); got != 5 {
+		t.Fatalf("n5 sees %d members, want C1 with 5", got)
+	}
+
+	// n2 wins term 2 with n3 and n4; n4 gets no entries from it.
+	cut := isolate(1, 5)
+	n.drop = func(m Message) bool { return cut(m) || m.From == 2 && m.To == 4 && m.Type == MsgApp }
+	n.force(2)
+	if n.nodes[2].Role() != Leader {
+		t.Fatal("n2 did not win term 2")
+	}
+	_, _, err := n.nodes[2].ProposeConfChange(ConfChange{Type: RemoveNode, Node: 1})
+	if err != nil {
+		return n, err
+	}
+	n.run()
+
+	// n1 wins term 3 with n4 and n5 and commits C1.
+	n.drop = isolate(2, 3)
+	n.force(1) // term 2: n4 has already voted for n2
+	n.force(1) // term 3
+	if n.nodes[1].Role() != Leader {
+		t.Fatalf("n1 role %v, want leader of term 3", n.nodes[1].Role())
+	}
+	n.tick(1, 2*testHeartbeatTick)
+	return n, nil
+}
+
+func TestOngaro2015MembershipBug(t *testing.T) {
+	if _, err := ongaro2015(t, nil); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("n2 proposed a membership change before committing in its term: %v", err)
+	}
+	n, err := ongaro2015(t, mutate(t, mutation.ConfChangeBeforeTermCommit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(id NodeID, index uint64) (Entry, bool) {
+		for _, e := range n.applied[id] {
+			if e.Index == index {
+				return e, true
+			}
+		}
+		return Entry{}, false
+	}
+	c2, ok2 := at(3, 3)
+	c1, ok1 := at(4, 2)
+	other, okOther := at(3, 2)
+	if !ok1 || !ok2 || !okOther {
+		t.Fatalf("expected n3 to apply indexes 2-3 and n4 index 2; n3 %v, n4 %v", n.applied[3], n.applied[4])
+	}
+	if c2.Type != EntryConfChange || c1.Type != EntryConfChange || other.Term == c1.Term {
+		t.Fatalf("mutant did not diverge: n4 applied %+v at 2, n3 applied %+v at 2", c1, other)
+	}
+}
