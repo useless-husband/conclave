@@ -58,9 +58,8 @@ order of storage and network calls and assert it.
 Before the fsync, `Raft.Early` hands out what is already decided: entries
 committed by followers' acknowledgements and confirmed reads. They are
 already on a majority of durable logs, so the server applies them and
-answers their clients while the next batch is being synced. Without this,
-every answer waited for the fsync of requests that arrived after it; with
-`F_FULLFSYNC` that doubled latency.
+answers their clients before it syncs the next batch. Without this, every
+answer also waited for the fsync of requests that arrived after it.
 
 A server does all of a batch's I/O synchronously in its loop. Group commit
 comes from the loop draining every queued message and request before calling
