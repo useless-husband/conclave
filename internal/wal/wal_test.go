@@ -346,6 +346,22 @@ func TestCrashDuringInstallSnapshot(t *testing.T) {
 			if !crashed && !newState {
 				t.Fatalf("seed %d step %d: InstallSnapshot returned but the old state came back", seed, step)
 			}
+			// The recovered log must accept appends and recover them
+			// again: a stale log left on disk behind the new snapshot
+			// would otherwise resurface or leave a gap.
+			next := got.SnapI + uint64(len(got.Ents)) + 1
+			must(t, w.Append(ents(next, next+2, 6)))
+			must(t, w.Sync())
+			must(t, w.Close())
+			w2, err := Open(disk, Options{})
+			if err != nil {
+				t.Fatalf("seed %d step %d: second reopen: %v", seed, step, err)
+			}
+			again := recovered(t, w2)
+			if again.SnapI != got.SnapI || !sameEntries(again.Ents, append(got.Ents, ents(next, next+2, 6)...)) {
+				t.Fatalf("seed %d step %d: after appending, recovered snap=%d with %d entries, want snap=%d with %d",
+					seed, step, again.SnapI, len(again.Ents), got.SnapI, len(got.Ents)+3)
+			}
 		}
 	}
 	if !sawDropped {

@@ -247,26 +247,29 @@ func Open(fs vfs.FS, opt Options) (*WAL, error) {
 	}
 
 	// Reconcile the replayed entries with the snapshot.
+	needReset := false
 	if len(ents) > 0 {
 		first, lastIdx := ents[0].Index, ents[len(ents)-1].Index
 		s := w.snap.Index
 		switch {
-		case lastIdx <= s:
-			ents = nil
-		case first <= s:
-			if ents[s-first].Term != w.snap.Term {
-				// The log disagrees with the snapshot at the snapshot's
-				// own index: the snapshot was installed over a divergent
-				// log and the crash came before the reset record. The
-				// whole log is the stale branch.
-				ents = nil
-				w.stats.StaleSuffixDropped = true
-			} else {
-				ents = ents[s-first+1:]
-			}
-		case first == s+1:
-		default:
+		case first > s+1:
 			return nil, fmt.Errorf("%w: log starts at %d but snapshot ends at %d", ErrCorrupt, first, s)
+		case lastIdx < s:
+			// The snapshot is newer than the whole log, which only an
+			// installed snapshot can be. The crash came before the reset
+			// record that voids the old log.
+			ents = nil
+			needReset = true
+		case first <= s && ents[s-first].Term != w.snap.Term:
+			// The log disagrees with the snapshot at the snapshot's own
+			// index: the snapshot was installed over a divergent log and
+			// the crash came before the reset record. The whole log is
+			// the stale branch.
+			ents = nil
+			needReset = true
+			w.stats.StaleSuffixDropped = true
+		case first <= s:
+			ents = ents[s-first+1:]
 		}
 	}
 	w.ents = ents
@@ -310,8 +313,33 @@ func Open(fs vfs.FS, opt Options) (*WAL, error) {
 		w.f = f
 		w.size = int64(validLen)
 	}
+	if needReset {
+		// Finish what the interrupted InstallSnapshot started. Without
+		// the reset record the stale entries stay on disk in front of
+		// everything appended from now on: the next recovery would see a
+		// gap, or would take the stale branch for the log again and drop
+		// the new, acknowledged entries with it.
+		if err := w.writeReset(w.snap.Index, w.snap.Term); err != nil {
+			return nil, err
+		}
+	}
 	w.stats.Segments = len(w.segs)
 	return w, nil
+}
+
+// writeReset durably records that the log before (index, term) is void.
+func (w *WAL) writeReset(index, term uint64) error {
+	var enc raft.Encoder
+	enc.Uvarint(index)
+	enc.Uvarint(term)
+	w.buf = appendRecord(w.buf, w.active().seq, recReset, enc.B)
+	if err := w.Sync(); err != nil {
+		return err
+	}
+	for i := range w.segs {
+		w.segs[i].maxIndex = 0
+	}
+	return nil
 }
 
 // replay applies the records of one segment and returns the length of its
@@ -645,21 +673,14 @@ func (w *WAL) InstallSnapshot(s raft.Snapshot) error {
 	if err := w.writeSnapshot(s); err != nil {
 		return err
 	}
-	if !w.opt.Mutations.Has(mutation.TruncateWithoutMarker) {
-		var enc raft.Encoder
-		enc.Uvarint(s.Index)
-		enc.Uvarint(s.Term)
-		w.buf = appendRecord(w.buf, w.active().seq, recReset, enc.B)
-	}
-	if err := w.Sync(); err != nil {
+	if w.opt.Mutations.Has(mutation.TruncateWithoutMarker) {
+		if err := w.Sync(); err != nil {
+			return err
+		}
+	} else if err := w.writeReset(s.Index, s.Term); err != nil {
 		return err
 	}
 	w.lastIndex = s.Index
-	if !w.opt.Mutations.Has(mutation.TruncateWithoutMarker) {
-		for i := range w.segs {
-			w.segs[i].maxIndex = 0
-		}
-	}
 	return w.purge()
 }
 
