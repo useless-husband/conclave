@@ -272,6 +272,9 @@ func (r *Raft) Term() uint64 { return r.term }
 // Leader returns the server this one believes is leader, or None.
 func (r *Raft) Leader() NodeID { return r.lead }
 
+// Vote returns the candidate this server voted for in the current term.
+func (r *Raft) Vote() NodeID { return r.vote }
+
 // Commit returns the commit index.
 func (r *Raft) Commit() uint64 { return r.commit }
 
