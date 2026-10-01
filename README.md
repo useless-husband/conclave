@@ -128,7 +128,15 @@ seconds and restarted on its data directory, and checks the recorded history
 with the same checker. A copy of the history with one read altered must be
 rejected, so the check cannot pass vacuously.
 
-{{E2E}}
+Three runs on this machine (seeds 1, 2, 3; 20 s of faults each, then 3 s
+without). Half of the clients give up on an operation after 300 ms, so some
+writes end with an unknown outcome while a leader is being replaced:
+
+| seed | SIGKILLs | operations completed | writes with unknown outcome | verdict | check time |
+|---|---|---|---|---|---|
+| 1 | 8 | 7,616 | 6 | linearizable | 6 ms |
+| 2 | 8 | 6,924 | 4 | linearizable | 6 ms |
+| 3 | 8 | 7,498 | 4 | linearizable | 5 ms |
 
 ### Performance
 

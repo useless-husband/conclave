@@ -203,7 +203,13 @@ func worker(id int, addrs []string, rec *recorder, seed uint64, stop <-chan stru
 		key := fmt.Sprintf("k%d", rng.IntN(4))
 		val := fmt.Sprintf("w%d.%d", id, n)
 		op := lincheck.Op{Client: id}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Odd workers give up quickly, so that some writes end with an
+		// unknown outcome while a leader is being replaced.
+		timeout := 5 * time.Second
+		if id%2 == 1 {
+			timeout = 300 * time.Millisecond
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		op.Call = rec.now()
 		var err error
 		switch r := rng.IntN(10); {
