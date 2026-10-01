@@ -82,6 +82,13 @@ func TestThreeServers(t *testing.T) {
 	if _, err := c.Get(ctx, "greeting"); !errors.Is(err, client.ErrNotFound) {
 		t.Fatalf("get after delete: %v", err)
 	}
+	odd := "a key/with spaces?and=%2F"
+	if err := c.Put(ctx, odd, "v"); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := c.Get(ctx, odd); err != nil || v != "v" {
+		t.Fatalf("odd key: %q %v", v, err)
+	}
 
 	// Stop the leader; the others elect a new one and keep serving.
 	leader := 0
@@ -104,7 +111,7 @@ func TestThreeServers(t *testing.T) {
 		t.Fatalf("restarted on %s, was %s", srv[leader].APIAddr(), addr)
 	}
 	waitFor(t, "the restarted server to catch up", func() bool {
-		return srv[leader].Status().Keys == 20
+		return srv[leader].Status().Keys == 21 // k0..k19 and the odd key
 	})
 }
 
