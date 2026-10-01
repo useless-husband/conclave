@@ -41,8 +41,42 @@ func (s *Sim) sendRaft(from raft.NodeID, m raft.Message) {
 	if n == 0 {
 		s.stats.Dropped++
 	}
+	src := s.node(from)
 	for i := 0; i < n; i++ {
-		s.at(s.delay(), &event{kind: evDeliver, node: m.To, msg: b})
+		e := &event{kind: evDeliver, node: m.To, msg: b, sent: s.now}
+		s.at(s.delay(), e)
+		if src != nil {
+			src.outbox = append(src.outbox, e)
+		}
+	}
+}
+
+// sendWindow is how long a message may sit in the sender's buffers: a
+// crash loses the messages sent within the last LossWindow of it.
+const sendWindow = 2 * Millisecond
+
+// loseSendBuffer cancels the messages n sent within the last window before
+// a crash, as a machine that loses power takes its socket buffers with it.
+func (s *Sim) loseSendBuffer(n *simNode, window Time) int {
+	lost := 0
+	for _, e := range n.outbox {
+		if e.sent >= s.now-window && !e.cancelled {
+			e.cancelled = true
+			lost++
+		}
+	}
+	n.outbox = n.outbox[:0]
+	return lost
+}
+
+// trimOutbox forgets messages old enough to have left the machine.
+func (n *simNode) trimOutbox(now Time) {
+	i := 0
+	for i < len(n.outbox) && n.outbox[i].sent < now-sendWindow {
+		i++
+	}
+	if i > 0 {
+		n.outbox = append(n.outbox[:0], n.outbox[i:]...)
 	}
 }
 

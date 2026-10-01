@@ -110,7 +110,10 @@ func RandomProfile(rng *prng.Rand) Profile {
 		ThinkMax:      pick(rng, 1*Millisecond, 20*Millisecond),
 	}
 	p.MaxSessions = pick(rng, p.Clients, 4096)
-	p.OpDeadline = p.ClientTimeout * Time(pick(rng, 3, 10))
+	// Clients keep retrying an operation for a while, as real ones do;
+	// an operation they give up on enters the history with an unknown
+	// outcome, which weakens the check.
+	p.OpDeadline = max(p.ClientTimeout*3, pick(rng, 300*Millisecond, 2*Second, 5*Second))
 	return p
 }
 

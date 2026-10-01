@@ -35,10 +35,16 @@ type simNode struct {
 	broken      bool // cannot recover its storage; stays down
 	bounce      bool // the current crash is followed by a quick restart
 
-	// Last observed role, term and vote, to notice transitions.
-	lastRole raft.Role
-	lastTerm uint64
-	lastVote raft.NodeID
+	// Last observed role, term, vote and commit index, to notice
+	// transitions.
+	lastRole   raft.Role
+	lastTerm   uint64
+	lastVote   raft.NodeID
+	lastCommit uint64
+
+	// outbox holds the messages sent within the last sendWindow; a crash
+	// loses some of them.
+	outbox []*event
 }
 
 func (n *simNode) up() bool { return n.nd != nil }
@@ -132,7 +138,7 @@ func (s *Sim) start(n *simNode) {
 	}
 	n.nd = nd
 	r := nd.Raft()
-	n.lastRole, n.lastTerm, n.lastVote = r.Role(), r.Term(), r.Vote()
+	n.lastRole, n.lastTerm, n.lastVote, n.lastCommit = r.Role(), r.Term(), r.Vote(), r.Commit()
 	s.at(Time(s.nemRng.Intn(int(n.tick)))+1, &event{kind: evTick, node: n.id, gen: n.inc})
 }
 
@@ -183,12 +189,27 @@ func (s *Sim) observe(n *simNode) {
 	if t > s.stats.MaxTerm {
 		s.stats.MaxTerm = t
 	}
+	n.trimOutbox(s.now)
+	commit := r.Commit()
 	voted := vote != raft.None && vote != n.id && (vote != n.lastVote || t != n.lastTerm)
 	elected := role == raft.Leader && (n.lastRole != raft.Leader || t != n.lastTerm)
-	n.lastRole, n.lastTerm, n.lastVote = role, t, vote
-	if s.chaos && (voted || elected) {
-		if p := s.prof.TransitionCrashPercent; p > 0 && s.nemRng.Intn(100) < p {
-			s.at(Time(s.nemRng.Intn(int(3*Millisecond))), &event{kind: evCrash, node: n.id, gen: n.inc})
+	committed := role == raft.Leader && commit > n.lastCommit
+	n.lastRole, n.lastTerm, n.lastVote, n.lastCommit = role, t, vote, commit
+	if s.chaos && (voted || elected || committed) {
+		p := s.prof.TransitionCrashPercent
+		if committed && !elected {
+			// A leader commits all the time; crash at a fraction of
+			// those moments.
+			p /= 8
+		}
+		if p > 0 && s.nemRng.Intn(100) < p {
+			// Usually at once, before what was just sent has left the
+			// machine; sometimes a little later.
+			d := Time(0)
+			if s.nemRng.Chance(1, 2) {
+				d = Time(s.nemRng.Intn(int(3 * Millisecond)))
+			}
+			s.at(d, &event{kind: evCrash, node: n.id, gen: n.inc})
 		}
 		if elected && s.prof.ReconfigureOnElection && s.prof.MembershipEvery > 0 && s.nemRng.Chance(1, 3) {
 			s.at(Time(s.nemRng.Intn(int(2*Millisecond))), &event{kind: evNemesis, nem: nemReconfigure})
@@ -266,6 +287,9 @@ func (s *Sim) crash(n *simNode, why string) {
 	n.nd = nil
 	n.inc++
 	n.disk.Crash()
+	if lost := s.loseSendBuffer(n, Time(s.nemRng.Intn(int(sendWindow)+1))); lost > 0 {
+		s.tracef("n%d lost %d unsent messages", n.id, lost)
+	}
 	n.pausedUntil = 0
 	s.tracef("n%d CRASH (%s)", n.id, why)
 	if !n.retired && !n.broken {

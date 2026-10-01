@@ -185,6 +185,10 @@ type event struct {
 	resp  node.Response
 	nem   nemesis
 	retry int
+	// sent and cancelled: a message is cancelled when its sender crashes
+	// before it left the sender's buffers.
+	sent      Time
+	cancelled bool
 }
 
 type eventQueue []*event
@@ -355,6 +359,9 @@ func (s *Sim) run() {
 			break
 		}
 		s.now = e.at
+		if e.cancelled {
+			continue
+		}
 		s.stats.Events++
 		s.hashEvent(e)
 		s.dispatch(e)
