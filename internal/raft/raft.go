@@ -1109,14 +1109,14 @@ func (r *Raft) ReadIndex(ctx uint64) error {
 	if r.role != Leader {
 		return ErrNotLeader
 	}
-	if r.mut.Has(mutation.ReadWithoutQuorum) {
-		r.readStates = append(r.readStates, ReadState{Context: ctx, Index: r.commit})
-		return nil
-	}
 	// Until the leader commits in its own term its commit index may lag
 	// behind writes acknowledged by a previous leader.
 	if !r.committedInTerm() {
 		return ErrNotReady
+	}
+	if r.mut.Has(mutation.ReadWithoutQuorum) {
+		r.readStates = append(r.readStates, ReadState{Context: ctx, Index: r.commit})
+		return nil
 	}
 	r.readSeq++
 	r.reads = append(r.reads, pendingRead{seq: r.readSeq, ctx: ctx, index: r.commit})

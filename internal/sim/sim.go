@@ -95,6 +95,8 @@ type Result struct {
 	// seed and options must have equal digests.
 	Digest uint64
 	Trace  []string
+	// TraceNote says which part of the run Trace covers.
+	TraceNote string
 	// History is the clients' history as given to the checker.
 	History []lincheck.Op
 	Lin     lincheck.Report
@@ -150,7 +152,11 @@ func (r *Result) Report() string {
 		fmt.Fprintf(&b, "\n[%v] %s: %s\n", v.At, v.Kind, v.Detail)
 	}
 	if len(r.Trace) > 0 {
-		fmt.Fprintf(&b, "\ntrace (last %d lines):\n", len(r.Trace))
+		if r.TraceNote != "" {
+			fmt.Fprintf(&b, "\n%s:\n", r.TraceNote)
+		} else {
+			fmt.Fprintf(&b, "\ntrace (last %d lines):\n", len(r.Trace))
+		}
 		for _, l := range r.Trace {
 			b.WriteString(l)
 			b.WriteByte('\n')
@@ -243,6 +249,8 @@ type Sim struct {
 
 	healOps   int // operations completed during the healing phase
 	linReport lincheck.Report
+	// The stretch of virtual time a linearizability violation is about.
+	linFrom, linTo Time
 }
 
 type entryID struct {
@@ -263,7 +271,24 @@ type route struct {
 func Run(opt Options) *Result {
 	s := newSim(opt)
 	s.run()
-	return s.result()
+	r := s.result()
+	if s.linFrom < s.linTo && opt.TraceLines >= 0 {
+		// The checker only fails at the end of the run, long after the
+		// events that matter left the trace buffer. Runs are
+		// deterministic, so run the seed again with the whole trace and
+		// keep the stretch around the operations the checker could not
+		// place.
+		o := opt
+		o.TraceLines = -1
+		again := newSim(o)
+		again.run()
+		if again.digest.Sum64() == r.Digest {
+			r.Trace = again.trace.window(s.linFrom-300*Millisecond, s.linTo+20*Millisecond, 600)
+			r.TraceNote = fmt.Sprintf("trace from %v to %v, around the operations the linearizability checker could not place",
+				s.linFrom-300*Millisecond, s.linTo+20*Millisecond)
+		}
+	}
+	return r
 }
 
 func newSim(opt Options) *Sim {
@@ -410,7 +435,13 @@ func (s *Sim) finish() {
 	s.stats.LinInconclusive = rep.Verdict == lincheck.Inconclusive
 	if rep.Verdict == lincheck.Violation {
 		var b strings.Builder
-		for _, k := range rep.Failed() {
+		for i, k := range rep.Failed() {
+			if i == 0 || Time(k.From) < s.linFrom {
+				s.linFrom = Time(k.From)
+			}
+			if Time(k.To) > s.linTo {
+				s.linTo = Time(k.To)
+			}
 			fmt.Fprintf(&b, "key %q (%d operations) is not linearizable\n%s", k.Key, k.Ops, k.Explanation)
 		}
 		s.violate("linearizability", "%s", strings.TrimSuffix(b.String(), "\n"))

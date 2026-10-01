@@ -110,9 +110,14 @@ type Result struct {
 	Verdict Verdict
 	// Steps is the number of moves tried.
 	Steps int
-	// Explanation is set for a violation: the longest linearizable prefix
-	// found and the operations that could not be placed after it.
+	// Explanation is set for a violation: the end of the longest
+	// linearizable prefix found and the operations that could not be
+	// placed after it.
 	Explanation string
+	// From and To bound, for a violation, the stretch of the history the
+	// explanation is about: from the earliest call among the operations
+	// left pending to the return that could not be passed.
+	From, To int64
 }
 
 type entry struct {
@@ -355,8 +360,21 @@ func Check[S comparable, O any](m Model[S, O], events []Event[O], budget int) Re
 			}
 			stack = stack[:len(stack)-1]
 			if len(stack) == 0 {
-				return Result{Verdict: Violation, Steps: steps,
+				res := Result{Verdict: Violation, Steps: steps,
 					Explanation: explain(m, events, deepest, deepStop, deepSt)}
+				if deepStop != nil {
+					res.From, res.To = deepStop.time, deepStop.time
+					in := map[int]bool{}
+					for _, mv := range deepest {
+						in[mv.call.op] = true
+					}
+					for i, ev := range events {
+						if !in[i] && ev.Call <= deepStop.time && ev.Call < res.From {
+							res.From = ev.Call
+						}
+					}
+				}
+				return res
 			}
 			p := &stack[len(stack)-1]
 			unlift(p.taken.call)
@@ -425,18 +443,27 @@ func explain[S comparable, O any](m Model[S, O], events []Event[O], best []move,
 		return fmt.Sprintf("%v", s)
 	}
 	var b []byte
-	b = fmt.Appendf(b, "longest linearizable prefix found (%d of %d operations):\n", len(best), len(events))
+	const show = 12
+	b = fmt.Appendf(b, "longest linearizable prefix found: %d of %d operations", len(best), len(events))
+	if len(best) > show {
+		b = fmt.Appendf(b, ", the last %d of them", show)
+	}
+	b = append(b, ":\n"...)
 	s := m.Init()
 	in := map[int]bool{}
-	for _, mv := range best {
+	for k, mv := range best {
 		i := mv.call.op
 		in[i] = true
+		line := ""
 		if mv.skip {
-			b = fmt.Appendf(b, "  %s  never took effect\n", describe(i))
-			continue
+			line = fmt.Sprintf("  %s  never took effect\n", describe(i))
+		} else {
+			_, s = m.Step(s, events[i].Op, events[i].Unknown)
+			line = fmt.Sprintf("  %s  -> %s\n", describe(i), desc(s))
 		}
-		_, s = m.Step(s, events[i].Op, events[i].Unknown)
-		b = fmt.Appendf(b, "  %s  -> %s\n", describe(i), desc(s))
+		if k >= len(best)-show {
+			b = append(b, line...)
+		}
 	}
 	if stop != nil {
 		b = fmt.Appendf(b, "in state %s nothing can be linearized before the return of\n  %s\n", desc(st), describe(stop.op))

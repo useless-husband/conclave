@@ -11,7 +11,10 @@ import (
 	"github.com/useless-husband/conclave/internal/mutation"
 )
 
-var flagMutSeeds = flag.Int("sim.mutseeds", 0, "override the seed bound of TestMutationsAreDetected")
+var (
+	flagMutSeeds = flag.Int("sim.mutseeds", 0, "override the seed bound of TestMutationsAreDetected")
+	flagReport   = flag.Bool("sim.report", false, "print the full failure report of each detection")
+)
 
 // mutationBound is the number of seeds within which the simulator must
 // expose each injected bug. The bounds are about twice the number of seeds
@@ -92,7 +95,9 @@ func TestMutationsAreDetected(t *testing.T) {
 			}
 			fmt.Fprintf(&table, "| %v | %d | %s |\n", m, seed, strings.Join(r.Kinds(), ", "))
 			t.Logf("detected at seed %d: %v", seed, r.Kinds())
-			if testing.Verbose() {
+			if *flagReport {
+				t.Log("\n" + r.Report())
+			} else if testing.Verbose() {
 				t.Log(firstLine(r.Violations[0].Detail))
 			}
 		})
