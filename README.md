@@ -26,9 +26,12 @@ when things do go wrong:
   of the real code (the classic Raft mistakes) can be switched on from tests
   only. The simulator catches every one of them within a bounded number of
   seeds; the table below says how many.
-- **It found real bugs.** During development the simulator found a
+- **It found a real bug.** During development the simulator found a
   write-ahead-log recovery bug that could silently drop acknowledged writes
   two restarts after an unlucky crash ([details](docs/DESIGN.md#4-the-write-ahead-log)).
+  It also exposed a bug in its own simulated client, which had produced a
+  false alarm; every detection in the mutation table below is therefore
+  re-run without the injected bug, and must pass.
 
 Standard library only: about 9,000 lines of Go and 3,700 lines of tests.
 
