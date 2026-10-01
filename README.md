@@ -89,20 +89,22 @@ transferred):
 ```console
 $ go run ./cmd/conclave sim -seed 17
 seed 17: profile nodes=3 clients=6 keys=1 drop=0‰ dup=10‰ delay=0.000100s..0.001000s spike=50‰/1.000000s crash/0.700000s membership/2.000000s transfer/2.000000s midio=100% torn=0% skew=5% transition-crash=0% reconfigure-on-election maxents=64 snapevery=50 segment=16384 sessions=4096 timeout=0.030000s deadline=5.000000s think<=0.020000s
-25.000000s simulated in 113ms: 96705 events, 55378 messages (0 dropped), 4549 client operations (0 unknown), 27 crashes (27 mid-I/O, 0 torn writes), 0 partitions, 0 pauses, 19 elections, max term 25, 12 snapshots installed, 3 members added, 2 removed
-history: 4549 operations checked (0 dropped as unobservable), linearizable, 12775 search steps
-digest ba6d09b8888aa8b2
+25.000000s simulated in 107ms: 95661 events, 53276 messages (0 dropped), 4307 client operations (5 unknown), 24 crashes (24 mid-I/O, 0 torn writes), 0 partitions, 0 pauses, 10 elections, max term 17, 8 snapshots installed, 3 members added, 2 removed
+history: 4308 operations checked (4 dropped as unobservable), linearizable, 13794 search steps
+digest bd306f5133175dba
 $ go run ./cmd/conclave sim -seed 17 -trace | grep -E 'CRASH|restart|ADD|leader term|torn'
 0.101551s  n2 leader term=1 last=0
 0.102250s  ADD n4 requested at leader n2
 0.102250s  ADD n4 at n2: retry
-0.318293s  n2 CRASH (crashed in the middle of disk I/O)
-0.721578s  n2 restart
-0.721578s  n2 recovery cut a torn tail of 5 bytes
-0.768317s  n1 leader term=2 last=43
-0.769162s  ADD n4 requested at leader n1
-0.771044s  ADD n4 at n1: ok
-0.880049s  n1 CRASH (crashed in the middle of disk I/O)
+0.311813s  n2 CRASH (crashed in the middle of disk I/O)
+0.715098s  n2 restart
+0.715098s  n2 recovery cut a torn tail of 4 bytes
+0.806955s  n1 leader term=2 last=48
+0.807800s  ADD n4 requested at leader n1
+0.809515s  ADD n4 at n1: ok
+0.888363s  n1 CRASH (crashed in the middle of disk I/O)
+1.172392s  n1 restart
+1.176753s  n4 leader term=3 last=69
 ...
 ```
 
@@ -110,39 +112,38 @@ $ go run ./cmd/conclave sim -seed 17 -trace | grep -E 'CRASH|restart|ADD|leader 
 
 With the `read-without-quorum` bug switched on (a leader answers reads
 without first confirming with a round of heartbeats that it is still
-leader), seed 74 ends like this (abridged). A partition cuts the leader n2
-off from n1 and n3 at 0.999 s; n3 wins term 2 and acknowledges two puts by
-1.602 s; at 1.605 s a client asks n2, which still believes it leads (old,
-delayed acknowledgements kept its check-quorum satisfied), and n2 answers
-with the value from before the partition:
+leader), seed 101 ends like this (abridged). A partition at 14.901 s leaves
+n3, the leader, on the minority side with n5. The majority elects n4, and
+client 1's put of `c1.791` commits there at 15.230 s. Nine milliseconds later
+the same client reads through n5, which points it at n3; n3 still believes
+it leads and answers with the value from before the partition:
 
 ```
-seed 74: FAILED with 1 violation(s)
-profile: nodes=3 clients=5 keys=1 drop=0‰ dup=50‰ delay=0.000100s..0.005000s spike=50‰/1.000000s partition/0.700000s crash/3.000000s membership/2.000000s transfer/2.000000s ...
+seed 101: FAILED with 1 violation(s)
+profile: nodes=5 clients=5 keys=2 drop=5‰ dup=50‰ delay=0.000100s..0.001000s spike=10‰/1.000000s partition/0.700000s crash/3.000000s ...
 mutations: read-without-quorum
-replay:  go run ./cmd/conclave sim -seed 74 -trace
+replay:  go test ./internal/sim -run 'TestMutationsAreDetected/read-without-quorum' -sim.report -v
 
-[25.000000s] linearizability: key "k0" (3996 operations) is not linearizable
-longest linearizable prefix found: 192 of 3996 operations, the last 12 of them:
+[25.000000s] linearizability: key "k0" (3153 operations) is not linearizable
+longest linearizable prefix found: 1884 of 3153 operations, the last 12 of them:
   ...
-  client 2 [1001657, 1601592] put("k0", "c2.34") -> ok  -> "c2.34"
-  client 4 [1093977, 1599056] put("k0", "c4.44") -> ok  -> "c4.44"
-  client 1 [1065373, 1612328] put("k0", "c1.40") -> ok  -> "c1.40"
-  client 0 [997325, 1617696] cas("k0", "c0.31", "c0.32") -> cas-failed  -> "c1.40"
-  client 4 [1605396, 1617183] cas("k0", "c4.44", "c4.45") -> cas-failed  -> "c1.40"
-in state "c1.40" nothing can be linearized before the return of
-  client 2 [1604659, 1608602] get("k0") -> "c0.31"
+  client 2 [15077013, 15079252] get("k0") -> "c3.677"  -> "c3.677"
+  client 0 [14900124, 15289059] put("k0", "c0.772") -> ok  -> "c0.772"
+  client 4 [14921148, 15329635] cas("k0", "c3.677", "c4.758") -> cas-failed  -> "c0.772"
+  client 1 [14927479, 15229724] put("k0", "c1.791") -> ok  -> "c1.791"
+in state "c1.791" nothing can be linearized before the return of
+  client 1 [15238421, 15239387] get("k0") -> "c3.677"
 ...
-trace from 0.741610s to 1.628602s, around the operations the linearizability checker could not place:
+trace from 14.938421s to 15.259387s, around the operations the linearizability checker could not place:
 ...
-0.998677s  PARTITION split n1-x>n2 n2-x>n1 n2-x>n3 n3-x>n2
+15.058205s  n4 leader term=11 last=2315
 ...
-1.542934s  n1 votes for n3 term=2
-1.547030s  n3 leader term=2 last=121
-1.599056s  client 4 put("k0", "c4.44") -> ok (index 123)
-1.601592s  client 2 put("k0", "c2.34") -> ok (index 124)
-1.604659s  client 2 sends get("k0") to n2 (request 440)
-1.608602s  client 2 get("k0") -> ok "c0.31" (index 121)
+15.227479s  client 1 sends put("k0", "c1.791") to n4 (request 4234)
+15.229724s  client 1 put("k0", "c1.791") -> ok (index 2319)
+15.238421s  client 1 sends get("k0") to n5 (request 4236)
+15.238763s  client 1 request 4236: not-leader (leader hint n3)
+15.238763s  client 1 sends get("k0") to n3 (request 4238)
+15.239387s  client 1 get("k0") -> ok "c3.677" (index 2314)
 ...
 ```
 
