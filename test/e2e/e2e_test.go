@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -183,8 +184,10 @@ func (r *recorder) bound(idx []int, at int64) {
 	}
 }
 
+// counts is updated by one worker and read by the test while the worker
+// runs.
 type counts struct {
-	ok, unknown, failed int
+	ok, unknown, failed atomic.Int64
 }
 
 // worker runs random operations with its own session until stop closes.
@@ -261,7 +264,7 @@ func worker(id int, addrs []string, rec *recorder, seed uint64, stop <-chan stru
 		case err == nil:
 			op.Return = ret
 			rec.add(op)
-			out.ok++
+			out.ok.Add(1)
 			if write {
 				// A later write of the session has been applied, so the
 				// abandoned ones took effect before now or never will.
@@ -271,7 +274,7 @@ func worker(id int, addrs []string, rec *recorder, seed uint64, stop <-chan stru
 		case write && errors.Is(err, client.ErrUnknown):
 			op.Unknown, op.Result = true, kv.Result{}
 			i := rec.add(op)
-			out.unknown++
+			out.unknown.Add(1)
 			if errors.Is(err, client.ErrSessionExpired) {
 				rec.bound(append(abandoned, i), ret)
 				abandoned = abandoned[:0]
@@ -279,7 +282,7 @@ func worker(id int, addrs []string, rec *recorder, seed uint64, stop <-chan stru
 				abandoned = append(abandoned, i)
 			}
 		default:
-			out.failed++ // not executed (or a read): no effect on the history
+			out.failed.Add(1) // not executed (or a read): no effect on the history
 		}
 	}
 }
@@ -323,21 +326,21 @@ func TestKillRestartUnderLoad(t *testing.T) {
 		c.start(victim, false)
 	}
 	// Fault-free tail: the cluster must make progress again.
-	healOK := 0
+	var healOK int64
 	for i := range cnt {
-		healOK -= cnt[i].ok
+		healOK -= cnt[i].ok.Load()
 	}
 	time.Sleep(3 * time.Second)
 	close(stop)
 	wg.Wait()
-	var tot counts
+	var ok, unknown, failed int64
 	for i := range cnt {
-		tot.ok += cnt[i].ok
-		tot.unknown += cnt[i].unknown
-		tot.failed += cnt[i].failed
-		healOK += cnt[i].ok
+		ok += cnt[i].ok.Load()
+		unknown += cnt[i].unknown.Load()
+		failed += cnt[i].failed.Load()
+		healOK += cnt[i].ok.Load()
 	}
-	t.Logf("%d kills; %d operations completed, %d writes with unknown outcome, %d requests not executed", kills, tot.ok, tot.unknown, tot.failed)
+	t.Logf("%d kills; %d operations completed, %d writes with unknown outcome, %d requests not executed", kills, ok, unknown, failed)
 	if healOK == 0 {
 		t.Fatal("no operation completed after the faults stopped")
 	}
