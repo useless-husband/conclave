@@ -18,7 +18,7 @@ for fsync in full none; do
 	FSYNC=$fsync sh scripts/cluster.sh start "$dir/c" >/dev/null
 	. "$dir/c/env"
 	for mix in put get mixed; do
-		for clients in 1 16 64; do
+		for clients in 1 16 128; do
 			echo "## fsync=$fsync mix=$mix clients=$clients"
 			"$dir/c/conclave" bench -mix "$mix" -clients "$clients" -duration "$duration" | tail -3
 		done
