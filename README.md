@@ -14,7 +14,7 @@ when things do go wrong:
   clocks or I/O of their own. The `conclave` binary drives them with TCP, a
   disk and a wall clock; the simulator drives *the same code* from one
   goroutine with a simulated network (delay, loss, duplication, reordering,
-  symmetric and one-way partitions), simulated disks (a crash keeps only
+  symmetric and one-way partitions between servers), simulated disks (a crash keeps only
   synced bytes, may tear the last write, and can strike in the middle of a
   write, fsync or rename), crashes, pauses, membership changes and client
   load, all drawn from one seed. The same seed gives a bit-identical run.
@@ -29,9 +29,9 @@ when things do go wrong:
 - **It found a real bug.** During development the simulator found a
   write-ahead-log recovery bug that could silently drop acknowledged writes
   two restarts after an unlucky crash ([details](docs/DESIGN.md#4-the-write-ahead-log)).
-  It also exposed a bug in its own simulated client, which had produced a
-  false alarm; every detection in the mutation table below is therefore
-  re-run without the injected bug, and must pass.
+  It also exposed two modelling errors in its own simulated clients, each
+  of which had produced a false alarm; every detection in the mutation table
+  below is therefore re-run without the injected bug, and must pass.
 
 Standard library only: about 9,000 lines of Go and 3,700 lines of tests.
 
