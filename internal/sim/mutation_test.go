@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 
 	"github.com/useless-husband/conclave/internal/mutation"
@@ -34,37 +33,47 @@ var mutationBound = map[mutation.Mutation]int{
 	mutation.ConfChangeBeforeTermCommit: 200,
 }
 
-// firstDetection runs seeds 1, 2, ... in parallel batches and returns the
-// smallest seed whose run violates a safety property, or 0.
+// firstDetection runs seeds 1, 2, ... on four goroutines and returns the
+// smallest seed whose run violates a safety property, or 0. Seeds are
+// handed out in order and no seed above a detection is started, so when
+// the workers stop every smaller seed has been run.
 func firstDetection(t *testing.T, m mutation.Mutation, bound int) (uint64, *Result) {
 	set := mutation.ForTest(t, m)
-	const batch = 8
-	for first := uint64(1); first <= uint64(bound); first += batch {
-		n := min(batch, bound-int(first)+1)
-		results := make([]*Result, n)
-		var wg sync.WaitGroup
-		var next atomic.Int64
-		for w := 0; w < 4; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for {
-					i := int(next.Add(1) - 1)
-					if i >= n {
-						return
-					}
-					results[i] = Run(Options{Seed: first + uint64(i), Mutations: set})
+	var (
+		mu   sync.Mutex
+		next uint64 = 1
+		best *Result
+		wg   sync.WaitGroup
+	)
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				mu.Lock()
+				seed := next
+				if seed > uint64(bound) || best != nil && seed > best.Seed {
+					mu.Unlock()
+					return
 				}
-			}()
-		}
-		wg.Wait()
-		for _, r := range results {
-			if r.SafetyViolated() {
-				return r.Seed, r
+				next++
+				mu.Unlock()
+				r := Run(Options{Seed: seed, Mutations: set})
+				if r.SafetyViolated() {
+					mu.Lock()
+					if best == nil || r.Seed < best.Seed {
+						best = r
+					}
+					mu.Unlock()
+				}
 			}
-		}
+		}()
 	}
-	return 0, nil
+	wg.Wait()
+	if best == nil {
+		return 0, nil
+	}
+	return best.Seed, best
 }
 
 // TestMutationsAreDetected is the evidence that the simulator can tell
