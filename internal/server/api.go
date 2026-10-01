@@ -191,7 +191,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, ok := s.exec(w, r, node.Request{Op: node.OpCommand, Cmd: c})
 	if ok {
-		writeJSON(w, http.StatusOK, KVBody{Index: resp.Index})
+		writeJSON(w, http.StatusOK, map[string]uint64{"index": resp.Index})
 	}
 }
 
