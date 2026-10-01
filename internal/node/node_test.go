@@ -64,12 +64,12 @@ func (c *cluster) start(id raft.NodeID, snapshotEvery uint64) {
 
 func (c *cluster) ready() {
 	for id := raft.NodeID(1); int(id) <= len(c.nodes); id++ {
-		for _, r := range c.nodes[id].Ready() {
+		c.nodes[id].Ready(func(r Response) {
 			if _, dup := c.resps[r.ID]; dup {
 				c.t.Fatalf("request %d answered twice", r.ID)
 			}
 			c.resps[r.ID] = r
-		}
+		})
 	}
 }
 

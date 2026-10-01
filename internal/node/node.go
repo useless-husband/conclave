@@ -289,10 +289,34 @@ func (n *Node) checkLeadership() {
 }
 
 // Ready completes a batch: it makes it durable, sends messages, applies
-// newly committed entries and returns every response decided so far. The
-// returned slice is only valid until the next call.
-func (n *Node) Ready() []Response {
-	out := n.r.Flush()
+// newly committed entries and passes every response decided so far to
+// emit. Responses that do not depend on this batch being durable (writes
+// already committed by a majority, confirmed reads) are emitted before the
+// batch's fsync, so that a client's answer does not wait for the disk
+// write of requests that arrived after it.
+func (n *Node) Ready(emit func(Response)) {
+	n.handle(n.r.Early())
+	n.flushOut(emit)
+	n.handle(n.r.Flush())
+	n.checkLeadership()
+	if n.applied-n.snapIndex >= n.cfg.SnapshotEvery {
+		if err := n.r.Compact(n.applied, n.sm.Snapshot()); err != nil {
+			panic(fmt.Sprintf("node n%d: compact at %d: %v", n.cfg.ID, n.applied, err))
+		}
+		n.snapIndex = n.applied
+	}
+	n.flushOut(emit)
+}
+
+func (n *Node) flushOut(emit func(Response)) {
+	for _, r := range n.out {
+		emit(r)
+	}
+	clear(n.out)
+	n.out = n.out[:0]
+}
+
+func (n *Node) handle(out raft.Output) {
 	if s := out.Snapshot; s != nil {
 		if err := n.sm.Restore(s.Data); err != nil {
 			// The leader sent a snapshot this server cannot read. Going
@@ -323,16 +347,6 @@ func (n *Node) Ready() []Response {
 		}
 	}
 	n.serveReads()
-	n.checkLeadership()
-	if n.applied-n.snapIndex >= n.cfg.SnapshotEvery {
-		if err := n.r.Compact(n.applied, n.sm.Snapshot()); err != nil {
-			panic(fmt.Sprintf("node n%d: compact at %d: %v", n.cfg.ID, n.applied, err))
-		}
-		n.snapIndex = n.applied
-	}
-	resp := n.out
-	n.out = n.out[:0:0]
-	return resp
 }
 
 func (n *Node) apply(e raft.Entry) {

@@ -1266,6 +1266,19 @@ func (r *Raft) Flush() Output {
 		r.deliver(&r.pre)
 	}
 
+	return r.take()
+}
+
+// Early returns what the driver may act on before the current batch is
+// durable: a snapshot to install, entries that are already committed, and
+// reads that are already confirmed. Committed entries are stored on a
+// majority of durable logs, so they may be applied, and their clients
+// answered, while this server's own new writes are still being synced;
+// otherwise every answer would wait for the fsync of the next batch.
+// Whatever Early returns is not returned again by Flush.
+func (r *Raft) Early() Output { return r.take() }
+
+func (r *Raft) take() Output {
 	var out Output
 	out.Snapshot, r.pendingSnap = r.pendingSnap, nil
 	if r.commit > r.applied {

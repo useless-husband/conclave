@@ -219,7 +219,7 @@ func status(args []string) error {
 
 func members(args []string) error {
 	if len(args) == 0 || (args[0] != "add" && args[0] != "remove") {
-		return errors.New("members add|remove ...")
+		return errors.New("usage: members add|remove [flags]")
 	}
 	fs := flag.NewFlagSet("members "+args[0], flag.ExitOnError)
 	addr := addrFlag(fs)

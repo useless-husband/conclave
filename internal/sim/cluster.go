@@ -47,8 +47,6 @@ type simNode struct {
 	outbox []*event
 }
 
-func (n *simNode) up() bool { return n.nd != nil }
-
 type transport struct {
 	s    *Sim
 	from raft.NodeID
@@ -172,9 +170,7 @@ func (s *Sim) onNode(n *simNode, f func(*node.Node)) {
 		s.crash(n, "panicked")
 	}()
 	f(n.nd)
-	for _, resp := range n.nd.Ready() {
-		s.routeResponse(n, resp)
-	}
+	n.nd.Ready(func(resp node.Response) { s.routeResponse(n, resp) })
 	s.observe(n)
 }
 

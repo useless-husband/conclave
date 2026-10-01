@@ -364,12 +364,12 @@ func (s *Server) run() {
 				break drain
 			}
 		}
-		for _, r := range s.nd.Ready() {
+		s.nd.Ready(func(r node.Response) {
 			if p, ok := pending[r.ID]; ok {
 				p.ch <- r
 				delete(pending, r.ID)
 			}
-		}
+		})
 		if ci := s.nd.Raft().Status().ConfIndex; ci != confIndex {
 			confIndex = ci
 			s.updateAddrs()
